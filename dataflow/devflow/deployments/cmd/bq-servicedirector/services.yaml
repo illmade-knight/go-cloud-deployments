@@ -1,0 +1,42 @@
+# services.yaml
+
+# Environment defines global settings for the entire architecture.
+region: "europe-west2"
+
+# service_manager_spec describes the ServiceDirector service itself.
+# The Conductor will deploy this service first.
+service_manager_spec:
+  name: "servicedirector-bq-flow"
+  service_account: "servicedirector-sa"
+
+# dataflows describes one or more independent data processing pipelines.
+dataflows:
+  bigquery-flow:
+    # services lists the application microservices to be deployed.
+    services:
+      ingestion-service:
+        name: "ingestion-service"
+        service_account: "ingestion-sa"
+
+      bigquery-service:
+        name: "bigquery-service"
+        service_account: "bigquery-sa"
+
+    # resources lists the cloud infrastructure the ServiceDirector must create
+    # BEFORE the application services are deployed.
+    resources:
+      topics:
+        - name: "ingestion-topic-bq"
+      subscriptions:
+        - name: "bq-subscription"
+          topic: "ingestion-topic-bq"
+      bigquery_datasets:
+        - name: "iot_data_bq"
+      bigquery_tables:
+        - name: "ingested_payloads_bq"
+          dataset: "iot_data_bq"
+          # The ServiceDirector uses this to find the schema struct in its code.
+          # This MUST be registered in the runservicedirector.go using servicemanager.RegisterSchema
+          schema_type: "github.com/illmade-knight/go-iot-dataflows/dataflow/devflow/EnrichedTestPayload"
+          # Example of adding clustering for performance.
+          clustering_fields: ["device_id"]

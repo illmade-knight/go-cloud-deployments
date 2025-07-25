@@ -2,84 +2,61 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"github.com/illmade-knight/go-cloud-manager/microservice/servicedirector"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
+	"gopkg.in/yaml.v3"
 	"os"
 	"os/signal"
 	"syscall"
-
-	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
 )
 
+//go:embed services.yaml
+var servicesYAML []byte
+
 func main() {
-	// Use a console writer for pretty, human-readable logs.
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
 
-	// Load the Director's own configuration. This will read flags like
-	// --services-def-path to find the services.yaml file.
+	// 1. Load Application Configuration
 	cfg, err := servicedirector.NewConfig()
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to load servicedirector config")
 	}
+	ctx := context.Background()
 
-	// --- THIS IS THE NEW LOGIC ---
-	// Check for a deployment environment variable.
-	deploymentEnv := os.Getenv("DEPLOYMENT_ENV")
-	if deploymentEnv != "" {
-		// If running in a deployed environment (e.g., "prod", "dev"), use the fixed container path.
-		log.Info().Str("env", deploymentEnv).Msg("Deployment environment detected.")
-		// The build process places the file at this path inside the container.
-		cfg.ServicesDefPath = "cmd/servicedirector/services.yaml"
-	} else {
-		// For local development, if the default services.yaml is not found,
-		// try a path relative to the project root. This makes `go run` work
-		// from the root directory without needing to pass a flag.
-		if _, err := os.Stat(cfg.ServicesDefPath); os.IsNotExist(err) {
-			log.Warn().
-				Str("path", cfg.ServicesDefPath).
-				Msg("Could not find services.yaml at default path. Trying relative path for local dev.")
-			devPath := "cmd/servicedirector/services.yaml" // Correct relative path from project root
-			if _, err2 := os.Stat(devPath); err2 == nil {
-				log.Info().Str("path", devPath).Msg("Found services.yaml at dev path.")
-				cfg.ServicesDefPath = devPath
-			} else {
-				log.Fatal().Err(err).Str("checked_paths", cfg.ServicesDefPath+", "+devPath).Msg("services.yaml definition file not found")
-			}
-		}
+	// 3. Load and Prepare the Architecture Definition
+	arch := &servicemanager.MicroserviceArchitecture{}
+	if err := yaml.Unmarshal(servicesYAML, arch); err != nil {
+		log.Fatal().Err(err).Msg("Failed to parse embedded services.yaml")
 	}
-
-	//TODO we need to get these from config
-	dataflowPaths := make([]string, 2)
-	outputFilePath := ""
-
-	// Create a loader that reads definitions from the specified YAML file.
-	loader, err := servicemanager.NewYAMLArchitectureIO(cfg.ServicesDefPath, dataflowPaths, outputFilePath)
-	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to load service director architecture")
+	// Override the project ID from the environment, as this is environment-specific.
+	projectIDFromEnv := os.Getenv("PROJECT_ID")
+	// OK this is a bit of a mess we need projectID truth source
+	if projectIDFromEnv != "" {
+		cfg.ProjectID = projectIDFromEnv
+		arch.ProjectID = projectIDFromEnv
 	}
-	log.Info().Str("yaml", cfg.ServicesDefPath).Msg("Loading services.yaml")
+	log.Info().Str("project-id", arch.ProjectID).Msg("Loaded service architecture from embedded services.yaml")
 
-	// Create the Director instance.
-	schemaRegistry := map[string]interface{}{}
-	director, err := servicedirector.NewServiceDirector(context.Background(), cfg, loader, schemaRegistry, log.Logger)
+	// This uses the production constructor
+	director, err := servicedirector.NewServiceDirector(ctx, cfg, arch, log.Logger)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to create Director")
 	}
 
-	// Start the service. This is non-blocking.
+	// 5. Start the Service and Wait for Shutdown
 	if err := director.Start(); err != nil {
 		log.Fatal().Err(err).Msg("Failed to start Director")
 	}
 	log.Info().Str("port", director.GetHTTPPort()).Msg("Director is running")
 
-	// Wait for a shutdown signal.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	log.Info().Msg("Shutdown signal received, stopping Director...")
 
-	// Gracefully shut down the service.
 	director.Shutdown()
 	log.Info().Msg("Director stopped.")
 }
