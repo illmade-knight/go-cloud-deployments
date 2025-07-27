@@ -1,6 +1,7 @@
 # services.yaml
-
-# Environment defines global settings for the entire architecture.
+name: "bigquery-dataflow"
+# CORRECTED: 'region' is now a top-level key because the Environment
+# struct is inlined in the Go code.
 region: "europe-west2"
 
 # service_manager_spec describes the ServiceDirector service itself.
@@ -8,6 +9,16 @@ region: "europe-west2"
 service_manager_spec:
   name: "servicedirector-bq-flow"
   service_account: "servicedirector-sa"
+  deployment:
+    source_path: "."
+    buildable_module_path: "cmd/bq-servicedirector"
+
+    environment_vars:
+      # These topics are used for communication between the Conductor and the Director.
+      PROJECT_ID: "replace-during-hydration"
+      SD_COMMAND_TOPIC: "director-commands-bq"
+      SD_COMPLETION_TOPIC: "director-events-bq"
+      SD_COMMAND_SUBSCRIPTION: "director-command-sub-bq"
 
 # dataflows describes one or more independent data processing pipelines.
 dataflows:
@@ -17,10 +28,36 @@ dataflows:
       ingestion-service:
         name: "ingestion-service"
         service_account: "ingestion-sa"
+        dependencies:
+          - "servicedirector-bq-flow"
+        deployment:
+          source_path: "."
+          buildable_module_path: "cmd/ingestion" # Path to your ingestion service code
+          secret_environment_vars:
+            - name: "APP_MQTT_PASSWORD"
+              value_from: "SERVICE_PASS" # The name of the secret in Secret Manager
+          environment_vars:
+            # The service needs to know which Pub/Sub topic to publish to.
+            TOPIC_ID: "ingestion-topic-bq"
+            # TODO get rid of one of these - no duplication - better setup
+            APP_PRODUCER_TOPIC_ID: "ingestion-topic-bq"
+            # Add other necessary config like MQTT broker URL
+            APP_MQTT_BROKER_URL: "tcp://mochi-885150127230.us-central1.run.app:1883"
+            APP_MQTT_USERNAME: "sreceiver"
 
       bigquery-service:
         name: "bigquery-service"
         service_account: "bigquery-sa"
+        dependencies:
+          - "servicedirector-bq-flow"
+        deployment:
+          source_path: "."
+          buildable_module_path: "cmd/bigquery" # Path to your BigQuery service code
+          environment_vars:
+            # The service needs to know which subscription and BQ table to use.
+            SUBSCRIPTION_ID: "bq-subscription"
+            DATASET_ID: "iot_data_bq"
+            TABLE_ID: "ingested_payloads_bq"
 
     # resources lists the cloud infrastructure the ServiceDirector must create
     # BEFORE the application services are deployed.
@@ -36,7 +73,6 @@ dataflows:
         - name: "ingested_payloads_bq"
           dataset: "iot_data_bq"
           # The ServiceDirector uses this to find the schema struct in its code.
-          # This MUST be registered in the runservicedirector.go using servicemanager.RegisterSchema
           schema_type: "github.com/illmade-knight/go-iot-dataflows/dataflow/devflow/EnrichedTestPayload"
           # Example of adding clustering for performance.
           clustering_fields: ["device_id"]

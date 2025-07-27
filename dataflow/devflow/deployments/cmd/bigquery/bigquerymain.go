@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -44,6 +45,8 @@ func messageTransformer(msg types.ConsumedMessage) (*EnrichedTestPayload, bool, 
 func main() {
 	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
 
+	ctx := context.Background()
+
 	// Load configuration using the flexible method that supports flags.
 	cfg, err := bigquery.LoadConfig()
 	if err != nil {
@@ -61,6 +64,7 @@ func main() {
 	// The BQServiceWrapper is generic, so we instantiate it with our specific
 	// TestPayload type and provide our custom transformer function.
 	bqService, err := bigquery.NewBQServiceWrapper[EnrichedTestPayload](
+		ctx,
 		cfg,
 		logger,
 		messageTransformer,

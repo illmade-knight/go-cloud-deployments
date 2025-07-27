@@ -3,9 +3,9 @@ module devflow/deployments
 go 1.23.0
 
 require (
-	github.com/illmade-knight/go-cloud-manager v0.0.22-prerelease
-	github.com/illmade-knight/go-dataflow v0.0.2-beta
-	github.com/illmade-knight/go-iot-dataflows v0.0.5-prerelease
+	github.com/illmade-knight/go-cloud-manager v0.0.25-beta
+	github.com/illmade-knight/go-dataflow v0.0.8-beta
+	github.com/illmade-knight/go-iot-dataflows v0.0.18-beta
 	github.com/rs/zerolog v1.34.0
 	gopkg.in/yaml.v3 v3.0.1
 )

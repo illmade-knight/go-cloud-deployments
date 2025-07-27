@@ -63,23 +63,19 @@ func checkGCPAuth(t *testing.T) {
 	// If we reach here, the authentication check was successful.
 }
 
-// TestPayload is the data structure for the simple ingestion test.
 type TestPayload struct {
 	DeviceID  string    `json:"device_id" bigquery:"device_id"`
 	Timestamp time.Time `json:"timestamp" bigquery:"timestamp"`
-	Value     float64   `json:"value"     bigquery:"value"`
+	Value     float64   `json:"value" bigquery:"value"`
 }
 
-// EnrichedTestPayload defines the final, flat schema for the BigQuery table.
-// This struct is used by the `startEnrichedBigQueryService` helper to correctly
-// transform the `types.PublishMessage` into the format expected by the database.
 type EnrichedTestPayload struct {
-	DeviceID   string    `json:"device_id" bigquery:"device_id"`
-	Timestamp  time.Time `json:"timestamp" bigquery:"timestamp"`
-	Value      float64   `json:"value"     bigquery:"value"`
-	ClientID   string    `json:"clientID"   bigquery:"clientID"`
-	LocationID string    `json:"locationID" bigquery:"locationID"`
-	Category   string    `json:"category"   bigquery:"category"`
+	DeviceID   string    `bigquery:"device_id"`
+	Timestamp  time.Time `bigquery:"timestamp"`
+	Value      float64   `bigquery:"value"`
+	ClientID   string    `bigquery:"client_id"`
+	LocationID string    `bigquery:"location_id"`
+	Category   string    `bigquery:"category"`
 }
 
 // DeviceIDExtractor is a test-local implementation of the AttributeExtractor interface.

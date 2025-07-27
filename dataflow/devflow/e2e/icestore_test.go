@@ -5,6 +5,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -64,7 +65,7 @@ func TestIceStoreDataflowE2E(t *testing.T) {
 		logger.Info().Msg("------------------------------------")
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	totalTestContext, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
 	// 1. Define unique resources for this test run.
@@ -101,16 +102,18 @@ func TestIceStoreDataflowE2E(t *testing.T) {
 		opts = append(opts, option.WithCredentialsFile(creds))
 	}
 	start := time.Now()
-	mqttConnInfo := emulators.SetupMosquittoContainer(t, ctx, emulators.GetDefaultMqttImageContainer())
+	mqttConnInfo := emulators.SetupMosquittoContainer(t, totalTestContext, emulators.GetDefaultMqttImageContainer())
 	timings["EmulatorSetup(MQTT)"] = time.Since(start).String()
 
-	gcsClient, err := storage.NewClient(ctx, opts...)
+	gcsClient, err := storage.NewClient(totalTestContext, opts...)
 	require.NoError(t, err)
-	defer gcsClient.Close()
+	t.Cleanup(func() {
+		_ = gcsClient.Close()
+	})
 
 	// 4. Start ServiceDirector and orchestrate resources.
 	start = time.Now()
-	directorService, directorURL := startServiceDirector(t, ctx, logger.With().Str("service", "servicedirector").Logger(), servicesConfig)
+	directorService, directorURL := startServiceDirector(t, totalTestContext, logger.With().Str("service", "servicedirector").Logger(), servicesConfig)
 	t.Cleanup(directorService.Shutdown)
 	timings["ServiceStartup(Director)"] = time.Since(start).String()
 
@@ -119,7 +122,7 @@ func TestIceStoreDataflowE2E(t *testing.T) {
 	resp, err := http.Post(setupURL, "application/json", bytes.NewBuffer([]byte{}))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	timings["CloudResourceSetup(Director)"] = time.Since(start).String()
 
 	t.Cleanup(func() {
@@ -128,21 +131,28 @@ func TestIceStoreDataflowE2E(t *testing.T) {
 		logger.Info().Msg("Requesting resource teardown from ServiceDirector...")
 		teardownURL := directorURL + "/orchestrate/teardown"
 		req, _ := http.NewRequestWithContext(cleanupCtx, http.MethodPost, teardownURL, nil)
-		http.DefaultClient.Do(req)
+		_, err = http.DefaultClient.Do(req)
+		require.NoError(t, err)
 
 		logger.Info().Str("bucket", uniqueBucketName).Msg("Ensuring GCS bucket is deleted directly as a fallback.")
 		bucket := gcsClient.Bucket(uniqueBucketName)
 		it := bucket.Objects(cleanupCtx, nil)
 		for {
 			attrs, err := it.Next()
-			if err == iterator.Done {
+			if errors.Is(err, iterator.Done) {
 				break
 			}
 			if err == nil {
-				bucket.Object(attrs.Name).Delete(cleanupCtx)
+				err = bucket.Object(attrs.Name).Delete(cleanupCtx)
+				if err != nil {
+					logger.Warn().Err(err).Str("bucket", uniqueBucketName).Msg("Failed to delete GCS bucket object.")
+				}
 			}
 		}
-		bucket.Delete(cleanupCtx)
+		err = bucket.Delete(cleanupCtx)
+		if err != nil {
+			logger.Warn().Err(err).Str("bucket", uniqueBucketName).Msg("Failed to delete GCS bucket.")
+		}
 		timings["CloudResourceTeardown"] = time.Since(teardownStart).String()
 	})
 
@@ -150,7 +160,7 @@ func TestIceStoreDataflowE2E(t *testing.T) {
 	start = time.Now()
 	var ingestionSvc, icestoreSvc microservice.Service
 	require.Eventually(t, func() bool {
-		ingestionSvc = startIngestionService(t, logger.With().Str("service", "ingestion").Logger(), directorURL, mqttConnInfo.EmulatorAddress, projectID, uniqueTopicID, dataflowName)
+		ingestionSvc = startIngestionService(t, totalTestContext, logger.With().Str("service", "ingestion").Logger(), directorURL, mqttConnInfo.EmulatorAddress, projectID, uniqueTopicID, dataflowName)
 		return true
 	}, 30*time.Second, 5*time.Second, "Ingestion service failed to start in time")
 	timings["ServiceStartup(Ingestion)"] = time.Since(start).String()
@@ -158,7 +168,7 @@ func TestIceStoreDataflowE2E(t *testing.T) {
 
 	start = time.Now()
 	require.Eventually(t, func() bool {
-		icestoreSvc = startIceStoreService(t, logger.With().Str("service", "icestore").Logger(), directorURL, projectID, uniqueIcestoreSubID, uniqueBucketName, dataflowName)
+		icestoreSvc = startIceStoreService(t, totalTestContext, logger.With().Str("service", "icestore").Logger(), directorURL, projectID, uniqueIcestoreSubID, uniqueBucketName, dataflowName)
 		return true
 	}, 30*time.Second, 5*time.Second, "IceStore service failed to start in time")
 	timings["ServiceStartup(IceStore)"] = time.Since(start).String()
@@ -177,18 +187,20 @@ func TestIceStoreDataflowE2E(t *testing.T) {
 
 	generator := loadgen.NewLoadGenerator(loadgenClient, devices, logger)
 	expectedMessageCount = generator.ExpectedMessagesForDuration(generateIcestoreMessagesFor)
-	publishedCount, err = generator.Run(ctx, generateIcestoreMessagesFor)
+	publishedCount, err = generator.Run(totalTestContext, generateIcestoreMessagesFor)
 	require.NoError(t, err)
 	timings["LoadGeneration"] = time.Since(loadgenStart).String()
 	logger.Info().Int("published_count", publishedCount).Msg("Load generator finished.")
 
 	// 7. Verify results.
 	verificationStart := time.Now()
-	gcsClientForVerification, err := storage.NewClient(ctx, opts...)
+	gcsClientForVerification, err := storage.NewClient(totalTestContext, opts...)
 	require.NoError(t, err)
-	defer gcsClientForVerification.Close()
+	t.Cleanup(func() {
+		_ = gcsClientForVerification.Close()
+	})
 
-	verifyGCSResults(t, logger, ctx, gcsClientForVerification, uniqueBucketName, publishedCount)
+	verifyGCSResults(t, logger, totalTestContext, gcsClientForVerification, uniqueBucketName, publishedCount)
 	timings["VerificationDuration"] = time.Since(verificationStart).String()
 	timings["ProcessingAndVerificationLatency"] = time.Since(loadgenStart).String()
 	verifiedCount = publishedCount // If verifyGCSResults passes, verified count equals published count.

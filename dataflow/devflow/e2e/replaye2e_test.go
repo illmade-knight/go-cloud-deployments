@@ -169,13 +169,13 @@ func TestReplayToSimpleBigqueryFlowE2E(t *testing.T) {
 	})
 
 	start = time.Now()
-	ingestionSvc := startIngestionService(t, logger, directorURL, mqttConn.EmulatorAddress, projectID, replayIngestionTopicID, replayDataflowName)
+	ingestionSvc := startIngestionService(t, totalTestContext, logger, directorURL, mqttConn.EmulatorAddress, projectID, replayIngestionTopicID, replayDataflowName)
 	timings["ServiceStartup(Ingestion)"] = time.Since(start).String()
 	t.Cleanup(ingestionSvc.Shutdown)
 
 	start = time.Now()
-	bqSvc := startBigQueryService(t, logger, directorURL, projectID, replayBigquerySubID, replayDatasetID, replayTableID, replayDataflowName)
-
+	bqSvc, err := startBigQueryService(t, totalTestContext, logger, directorURL, projectID, replayBigquerySubID, replayDatasetID, replayTableID, replayDataflowName)
+	require.NoError(t, err)
 	timings["ServiceStartup(BigQuery)"] = time.Since(start).String()
 	t.Cleanup(bqSvc.Shutdown)
 	logger.Info().Msg("Replay target services started successfully.")

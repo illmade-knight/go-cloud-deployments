@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/signal"
 	"syscall"
@@ -14,6 +15,8 @@ import (
 func main() {
 	// Use a console writer for pretty, human-readable logs.
 	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
+
+	ctx := context.Background()
 
 	// Load the configuration for the ingestion service.
 	cfg, err := ingestion.LoadConfig()
@@ -31,7 +34,7 @@ func main() {
 	// Create the IngestionService instance using the refactored wrapper.
 	// The wrapper now internally handles message transformation, so we no longer
 	// create or inject an 'extractor' here.
-	ingestionService, err := ingestion.NewIngestionServiceWrapper(cfg, logger)
+	ingestionService, err := ingestion.NewIngestionServiceWrapper(ctx, cfg, logger)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Failed to create IngestionService")
 	}

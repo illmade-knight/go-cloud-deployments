@@ -7,6 +7,7 @@ import (
 	"cloud.google.com/go/pubsub"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"testing"
@@ -45,10 +46,8 @@ func setupCommandInfrastructure(t *testing.T, ctx context.Context, pubsubClient 
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), time.Second*30)
-		defer cancel()
-		require.NoError(t, completionTopic.Delete(cleanupCtx))
-		require.NoError(t, cmdTopic.Delete(cleanupCtx))
+		require.NoError(t, completionTopic.Delete(ctx))
+		require.NoError(t, cmdTopic.Delete(ctx))
 		// Subscription is deleted with the topic
 	})
 }
@@ -108,7 +107,7 @@ func startServiceDirector(t *testing.T, ctx context.Context, logger zerolog.Logg
 }
 
 // startIngestionService starts the refactored ingestion service.
-func startIngestionService(t *testing.T, logger zerolog.Logger, directorURL, mqttURL, projectID, topicID, dataflowName string) microservice.Service {
+func startIngestionService(t *testing.T, ctx context.Context, logger zerolog.Logger, directorURL, mqttURL, projectID, topicID, dataflowName string) microservice.Service {
 	t.Helper()
 	cfg := &ingestion.Config{
 		BaseConfig:         microservice.BaseConfig{LogLevel: "debug", HTTPPort: ":0", ProjectID: projectID},
@@ -121,11 +120,11 @@ func startIngestionService(t *testing.T, logger zerolog.Logger, directorURL, mqt
 	cfg.MQTT.Topic = "devices/+/data"
 	cfg.MQTT.ClientIDPrefix = "ingestion-e2e-"
 
-	wrapper, err := ingestion.NewIngestionServiceWrapper(cfg, logger)
+	wrapper, err := ingestion.NewIngestionServiceWrapper(ctx, cfg, logger)
 	require.NoError(t, err)
 
 	go func() {
-		if err := wrapper.Start(); err != nil && err != http.ErrServerClosed {
+		if err := wrapper.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error().Err(err).Msg("IngestionService failed during test execution")
 		}
 	}()
@@ -139,7 +138,9 @@ func startIngestionService(t *testing.T, logger zerolog.Logger, directorURL, mqt
 		if err != nil {
 			return false
 		}
-		defer resp.Body.Close()
+		defer func() {
+			_ = resp.Body.Close()
+		}()
 		return resp.StatusCode == http.StatusOK
 	}, 15*time.Second, 500*time.Millisecond, "IngestionService health check did not become OK")
 
@@ -161,7 +162,7 @@ func startEnrichmentService(t *testing.T, ctx context.Context, logger zerolog.Lo
 	cfg.CacheConfig.FirestoreConfig = &cache.FirestoreConfig{CollectionName: firestoreCollection, ProjectID: projectID}
 	cfg.ProcessorConfig.NumWorkers = 5
 
-	wrapper, err := enrichment.NewPublishMessageEnrichmentServiceWrapper(cfg, ctx, logger)
+	wrapper, err := enrichment.NewPublishMessageEnrichmentServiceWrapper(ctx, ctx, cfg, logger)
 	require.NoError(t, err)
 
 	go func() {
@@ -172,8 +173,8 @@ func startEnrichmentService(t *testing.T, ctx context.Context, logger zerolog.Lo
 	return wrapper
 }
 
-// startBigQueryService starts a BigQuery service for non-enriched payloads.
-func startBigQueryService(t *testing.T, logger zerolog.Logger, directorURL, projectID, subID, datasetID, tableID, dataflowName string) microservice.Service {
+// startBigQueryService is updated with the correct transformer logic.
+func startBigQueryService(t *testing.T, ctx context.Context, logger zerolog.Logger, directorURL, projectID, subID, datasetID, tableID, dataflowName string) (microservice.Service, error) {
 	t.Helper()
 	cfg := &bigquery.Config{
 		BaseConfig:         microservice.BaseConfig{LogLevel: "debug", HTTPPort: ":0", ProjectID: projectID},
@@ -188,26 +189,40 @@ func startBigQueryService(t *testing.T, logger zerolog.Logger, directorURL, proj
 	cfg.BatchProcessing.NumWorkers = 2
 	cfg.BatchProcessing.FlushTimeout = 5 * time.Second
 
+	// --- THE FIX: Update the transformer to handle the new message structure ---
 	transformer := func(msg types.ConsumedMessage) (*TestPayload, bool, error) {
+		// 1. Unmarshal the outer message structure published by the IngestionService.
+		var rawMsg ingestion.RawMessage
+		if err := json.Unmarshal(msg.Payload, &rawMsg); err != nil {
+			logger.Warn().Err(err).Msg("Failed to unmarshal outer RawMessage, skipping.")
+			return nil, true, nil
+		}
+
+		// 2. Unmarshal the inner payload into the target BigQuery struct.
 		var p TestPayload
-		if err := json.Unmarshal(msg.Payload, &p); err != nil {
-			return nil, true, fmt.Errorf("bad payload for bq: %w", err)
+		if err := json.Unmarshal(rawMsg.Payload, &p); err != nil {
+			logger.Warn().Err(err).Msg("Failed to unmarshal inner payload for BQ, skipping.")
+			return nil, true, nil
 		}
 		return &p, false, nil
 	}
-	wrapper, err := bigquery.NewBQServiceWrapper[TestPayload](cfg, logger, transformer)
-	require.NoError(t, err)
+	// --- END FIX ---
+
+	wrapper, err := bigquery.NewBQServiceWrapper[TestPayload](ctx, cfg, logger, transformer)
+	if err != nil {
+		return nil, err
+	}
 
 	go func() {
-		if err := wrapper.Start(); err != nil && err != http.ErrServerClosed {
+		if err := wrapper.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error().Err(err).Msg("BigQueryService failed")
 		}
 	}()
-	return wrapper
+	return wrapper, nil
 }
 
-// startEnrichedBigQueryService starts a BigQuery service for enriched payloads.
-func startEnrichedBigQueryService(t *testing.T, logger zerolog.Logger, directorURL, projectID, subID, datasetID, tableID, dataflowName string) microservice.Service {
+// startEnrichedBigQueryService is also updated with the correct transformer logic.
+func startEnrichedBigQueryService(t *testing.T, ctx context.Context, logger zerolog.Logger, directorURL, projectID, subID, datasetID, tableID, dataflowName string) (microservice.Service, error) {
 	t.Helper()
 	cfg := &bigquery.Config{
 		BaseConfig:         microservice.BaseConfig{LogLevel: "debug", HTTPPort: ":0", ProjectID: projectID},
@@ -222,41 +237,55 @@ func startEnrichedBigQueryService(t *testing.T, logger zerolog.Logger, directorU
 	cfg.BatchProcessing.NumWorkers = 2
 	cfg.BatchProcessing.FlushTimeout = 5 * time.Second
 
+	// UPDATED: The transformer now correctly extracts data from the generic EnrichmentData map.
 	transformer := func(msg types.ConsumedMessage) (*EnrichedTestPayload, bool, error) {
-		var enrichedPayload types.PublishMessage
-		if err := json.Unmarshal(msg.Payload, &enrichedPayload); err != nil {
-			return nil, true, fmt.Errorf("failed to unmarshal enriched publish message: %w", err)
+		var enrichedMsg types.PublishMessage
+		if err := json.Unmarshal(msg.Payload, &enrichedMsg); err != nil {
+			logger.Warn().Err(err).Msg("Failed to unmarshal enriched publish message, skipping.")
+			return nil, true, nil
 		}
+
 		var originalPayload TestPayload
-		if err := json.Unmarshal(enrichedPayload.Payload, &originalPayload); err != nil {
-			return nil, true, fmt.Errorf("failed to unmarshal inner payload for BQ: %w", err)
+		if err := json.Unmarshal(enrichedMsg.Payload, &originalPayload); err != nil {
+			logger.Warn().Err(err).Msg("Failed to unmarshal inner original payload, skipping.")
+			return nil, true, nil
 		}
+
 		p := &EnrichedTestPayload{
 			DeviceID:  originalPayload.DeviceID,
 			Timestamp: originalPayload.Timestamp,
 			Value:     originalPayload.Value,
 		}
-		if enrichedPayload.DeviceInfo != nil {
-			p.ClientID = enrichedPayload.DeviceInfo.Name
-			p.LocationID = enrichedPayload.DeviceInfo.Location
-			p.Category = enrichedPayload.DeviceInfo.ServiceTag
+		// Safely extract data from the map with type assertions.
+		if enrichedMsg.EnrichmentData != nil {
+			if name, ok := enrichedMsg.EnrichmentData["name"].(string); ok {
+				p.ClientID = name
+			}
+			if location, ok := enrichedMsg.EnrichmentData["location"].(string); ok {
+				p.LocationID = location
+			}
+			if category, ok := enrichedMsg.EnrichmentData["serviceTag"].(string); ok {
+				p.Category = category
+			}
 		}
 		return p, false, nil
 	}
 
-	wrapper, err := bigquery.NewBQServiceWrapper[EnrichedTestPayload](cfg, logger, transformer)
-	require.NoError(t, err)
+	wrapper, err := bigquery.NewBQServiceWrapper[EnrichedTestPayload](ctx, cfg, logger, transformer)
+	if err != nil {
+		return nil, err
+	}
 
 	go func() {
 		if err := wrapper.Start(); err != nil && err != http.ErrServerClosed {
 			logger.Error().Err(err).Msg("Enriched BigQueryService failed")
 		}
 	}()
-	return wrapper
+	return wrapper, nil
 }
 
 // startIceStoreService starts an IceStore service for archiving payloads to GCS.
-func startIceStoreService(t *testing.T, logger zerolog.Logger, directorURL, projectID, subID, bucketName, dataflowName string) microservice.Service {
+func startIceStoreService(t *testing.T, ctx context.Context, logger zerolog.Logger, directorURL, projectID, subID, bucketName, dataflowName string) microservice.Service {
 	t.Helper()
 	cfg := &icestore.Config{
 		BaseConfig:         microservice.BaseConfig{LogLevel: "debug", HTTPPort: ":0", ProjectID: projectID},
@@ -271,7 +300,7 @@ func startIceStoreService(t *testing.T, logger zerolog.Logger, directorURL, proj
 	cfg.BatchProcessing.NumWorkers = 2
 	cfg.BatchProcessing.FlushTimeout = 5 * time.Second
 
-	wrapper, err := icestore.NewIceStoreServiceWrapper(cfg, logger)
+	wrapper, err := icestore.NewIceStoreServiceWrapper(ctx, cfg, logger)
 	require.NoError(t, err)
 
 	go func() {

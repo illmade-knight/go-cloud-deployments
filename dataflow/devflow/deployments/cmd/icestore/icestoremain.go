@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/signal"
 	"syscall"
@@ -14,6 +15,8 @@ func main() {
 	// Configure zerolog for console-friendly output.
 
 	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
+
+	ctx := context.Background()
 
 	// Load configuration using the flexible method that supports flags,
 	// environment variables, and a config file.
@@ -41,7 +44,7 @@ func main() {
 
 	// The NewIceStoreServiceWrapper constructor assembles the entire pipeline,
 	// including the consumer, batcher, and uploader.
-	iceStoreService, err := icestore.NewIceStoreServiceWrapper(cfg, logger)
+	iceStoreService, err := icestore.NewIceStoreServiceWrapper(ctx, cfg, logger)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to create IceStore Service")
 	}

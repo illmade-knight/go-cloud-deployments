@@ -29,6 +29,15 @@ func main() {
 	// --- 1. Define flags for command-line control ---
 	projectID := flag.String("project-id", "", "GCP Project ID (required)")
 	teardown := flag.Bool("teardown", false, "If true, tear down all deployed services instead of deploying")
+
+	// Add new flags for each step of the conductor's run, defaulting to true.
+	runSetupIAM := flag.Bool("run-setup-iam", true, "Execute Step 1: Set up IAM for the ServiceDirector.")
+	runDeployDirector := flag.Bool("run-deploy-director", true, "Execute Step 2: Deploy the ServiceDirector service.")
+	runSetupResources := flag.Bool("run-setup-resources", true, "Execute Step 3: Trigger creation of dataflow resources.")
+	runApplyIAM := flag.Bool("run-apply-iam", true, "Execute Step 4: Apply IAM policies for dataflow services.")
+	runDeployServices := flag.Bool("run-deploy-services", true, "Execute Step 5: Deploy all dataflow microservices.")
+	directorURLOverride := flag.String("director-url", "", "Override for the ServiceDirector URL if its deployment is skipped.")
+
 	flag.Parse()
 
 	if *projectID == "" {
@@ -40,7 +49,6 @@ func main() {
 	if err := yaml.Unmarshal(servicesYAML, &arch); err != nil {
 		log.Fatal().Err(err).Msg("Failed to parse embedded services.yaml")
 	}
-	// Override the project ID from the command line, as it's environment-specific.
 	arch.ProjectID = *projectID
 	log.Info().Str("project_id", arch.ProjectID).Msg("Loaded service architecture")
 
@@ -54,19 +62,28 @@ func main() {
 	if *teardown {
 		runTeardown(ctx, &arch, log.Logger)
 	} else {
-		runDeployment(ctx, &arch, log.Logger)
+		// Populate the options from the command-line flags.
+		opts := orchestration.ConductorOptions{
+			SetupServiceDirectorIAM: *runSetupIAM,
+			DeployServiceDirector:   *runDeployDirector,
+			SetupDataflowResources:  *runSetupResources,
+			ApplyDataflowIAM:        *runApplyIAM,
+			DeployDataflowServices:  *runDeployServices,
+			DirectorURLOverride:     *directorURLOverride,
+		}
+		runDeployment(ctx, &arch, log.Logger, opts)
 	}
 }
 
-func runDeployment(ctx context.Context, arch *servicemanager.MicroserviceArchitecture, logger zerolog.Logger) {
+func runDeployment(ctx context.Context, arch *servicemanager.MicroserviceArchitecture, logger zerolog.Logger, opts orchestration.ConductorOptions) {
 	log.Info().Msg("Starting deployment conductor...")
 
-	conductor, err := orchestration.NewConductor(ctx, arch, logger)
+	conductor, err := orchestration.NewConductor(ctx, arch, logger, opts)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to create conductor")
 	}
 
-	// This single call orchestrates everything.
+	// This single call orchestrates everything based on the provided options.
 	if err := conductor.Run(ctx); err != nil {
 		log.Fatal().Err(err).Msg("Conductor run failed")
 	}
@@ -97,7 +114,8 @@ func runTeardown(ctx context.Context, arch *servicemanager.MicroserviceArchitect
 	}
 
 	// Finally, tear down the conductor's own framework resources (IAM, topics).
-	conductor, _ := orchestration.NewConductor(ctx, arch, logger)
+	// Create a conductor with default options just for teardown.
+	conductor, _ := orchestration.NewConductor(ctx, arch, logger, orchestration.ConductorOptions{})
 	if err := conductor.Teardown(ctx); err != nil {
 		log.Error().Err(err).Msg("Conductor framework teardown failed")
 	}

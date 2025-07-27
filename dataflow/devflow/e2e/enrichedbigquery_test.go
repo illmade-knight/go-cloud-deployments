@@ -170,7 +170,7 @@ func TestEnrichmentToBigQueryE2E(t *testing.T) {
 	})
 
 	start = time.Now()
-	ingestionSvc := startIngestionService(t, logger, directorURL, mqttConn.EmulatorAddress, projectID, ingestionTopicID, dataflowName)
+	ingestionSvc := startIngestionService(t, totalTestContext, logger, directorURL, mqttConn.EmulatorAddress, projectID, ingestionTopicID, dataflowName)
 	timings["ServiceStartup(Ingestion)"] = time.Since(start).String()
 	t.Cleanup(ingestionSvc.Shutdown)
 
@@ -180,7 +180,8 @@ func TestEnrichmentToBigQueryE2E(t *testing.T) {
 	t.Cleanup(enrichmentSvc.Shutdown)
 
 	start = time.Now()
-	bqSvc := startEnrichedBigQueryService(t, logger, directorURL, projectID, bigquerySubID, uniqueDatasetID, uniqueTableID, dataflowName)
+	bqSvc, err := startEnrichedBigQueryService(t, totalTestContext, logger, directorURL, projectID, bigquerySubID, uniqueDatasetID, uniqueTableID, dataflowName)
+	require.NoError(t, err)
 	timings["ServiceStartup(BigQuery)"] = time.Since(start).String()
 	t.Cleanup(bqSvc.Shutdown)
 	logger.Info().Msg("All services started successfully.")

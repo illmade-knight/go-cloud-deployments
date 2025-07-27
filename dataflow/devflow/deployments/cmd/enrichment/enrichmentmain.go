@@ -14,6 +14,8 @@ import (
 func main() {
 	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
 
+	ctx := context.Background()
+
 	// Load configuration using the flexible method that supports flags.
 	cfg, err := enrichment.LoadConfig()
 	if err != nil {
@@ -32,8 +34,9 @@ func main() {
 	// the MessageEnricherFactory signature required by the service wrapper.
 	// We are instantiating the generic service to produce enrichment.EnrichedMessage.
 	enrichmentService, err := enrichment.NewPublishMessageEnrichmentServiceWrapper(
+		ctx,
+		ctx,
 		cfg,
-		context.Background(),
 		logger,
 	)
 	if err != nil {

@@ -39,6 +39,8 @@ dataflows:
           environment_vars:
             # The service needs to know which Pub/Sub topic to publish to.
             TOPIC_ID: "ingestion-topic-bq"
+            # TODO get rid of one of these - no duplication - better setup
+            APP_PRODUCER_TOPIC_ID: "ingestion-topic-bq"
             # Add other necessary config like MQTT broker URL
             APP_MQTT_BROKER_URL: "tcp://mochi-885150127230.us-central1.run.app:1883"
             APP_MQTT_USERNAME: "sreceiver"

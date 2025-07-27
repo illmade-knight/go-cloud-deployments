@@ -44,7 +44,6 @@ func TestFullDataflowE2E(t *testing.T) {
 		checkGCPAuth(t)
 	}
 
-	// --- Timing & Metrics Setup ---
 	timings := make(map[string]string)
 	testStart := time.Now()
 	var publishedCount int
@@ -54,7 +53,6 @@ func TestFullDataflowE2E(t *testing.T) {
 		timings["TotalTestDuration"] = time.Since(testStart).String()
 		timings["MessagesExpected"] = strconv.Itoa(expectedMessageCount)
 		timings["MessagesPublished(Actual)"] = strconv.Itoa(publishedCount)
-		// For BQ, the verified count is always the published count if the test passes.
 		timings["MessagesVerified(Actual)"] = strconv.Itoa(publishedCount)
 
 		t.Log("\n--- Test Timing & Metrics Breakdown ---")
@@ -69,7 +67,6 @@ func TestFullDataflowE2E(t *testing.T) {
 
 	logger := log.With().Str("test", "TestFullDataflowE2E").Logger()
 
-	// 1. Define the exact resources needed for this test.
 	runID := uuid.New().String()[:8]
 	dataflowName := fmt.Sprintf("bq-flow-%s", runID)
 	uniqueTopicID := fmt.Sprintf("dev-ingestion-topic-%s", runID)
@@ -78,22 +75,8 @@ func TestFullDataflowE2E(t *testing.T) {
 	uniqueTableID := fmt.Sprintf("dev_ingested_payloads_%s", runID)
 	logger.Info().Str("run_id", runID).Msg("Generated unique resources for test run")
 
-	// now we don't need to set up the command infrastructure if we don't use it
-	// client, err := pubsub.NewClient(totalTestContext, projectID)
-	// require.NoError(t, err)
-	// t.Cleanup(func() {
-	//	 client.Close()
-	// })
-
-	//commandTopic := fmt.Sprintf("dev-command-topic-%s", runID)
-	//commandSubscription := fmt.Sprintf("dev-command-subscription-%s", runID)
-	//completionTopic := fmt.Sprintf("dev-completion-topic-%s", runID)
-	//setupCommandInfrastructure(t, totalTestContext, client, commandTopic, commandSubscription, completionTopic)
-
-	// 2. Build the services definition in memory.
 	schemaIdentifier := "github.com/illmade-knight/go-iot-dataflows/dataflow/devflow/e2e.TestPayload"
-	// The schema has to be registered with servicemanager
-	servicemanager.RegisterSchema(schemaIdentifier, EnrichedTestPayload{})
+	servicemanager.RegisterSchema(schemaIdentifier, TestPayload{})
 	servicesConfig := &servicemanager.MicroserviceArchitecture{
 		Environment: servicemanager.Environment{
 			Name:      "e2e",
@@ -105,13 +88,8 @@ func TestFullDataflowE2E(t *testing.T) {
 				Name:      dataflowName,
 				Lifecycle: &servicemanager.LifecyclePolicy{Strategy: servicemanager.LifecycleStrategyEphemeral},
 				Resources: servicemanager.CloudResourcesSpec{
-					Topics: []servicemanager.TopicConfig{{CloudResource: servicemanager.CloudResource{Name: uniqueTopicID}}},
-					Subscriptions: []servicemanager.SubscriptionConfig{
-						{
-							CloudResource: servicemanager.CloudResource{Name: uniqueSubID},
-							Topic:         uniqueTopicID,
-						},
-					},
+					Topics:           []servicemanager.TopicConfig{{CloudResource: servicemanager.CloudResource{Name: uniqueTopicID}}},
+					Subscriptions:    []servicemanager.SubscriptionConfig{{CloudResource: servicemanager.CloudResource{Name: uniqueSubID}, Topic: uniqueTopicID}},
 					BigQueryDatasets: []servicemanager.BigQueryDataset{{CloudResource: servicemanager.CloudResource{Name: uniqueDatasetID}}},
 					BigQueryTables: []servicemanager.BigQueryTable{
 						{
@@ -126,7 +104,6 @@ func TestFullDataflowE2E(t *testing.T) {
 		},
 	}
 
-	// 3. Start services and setup resources.
 	var opts []option.ClientOption
 	if creds := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"); creds != "" {
 		opts = append(opts, option.WithCredentialsFile(creds))
@@ -140,29 +117,19 @@ func TestFullDataflowE2E(t *testing.T) {
 	timings["EmulatorSetup(MQTT)"] = time.Since(start).String()
 
 	start = time.Now()
-	// Call the new, refactored startServiceDirector helper.
 	directorService, directorURL := startServiceDirector(t, totalTestContext, logger.With().Str("service", "servicedirector").Logger(), servicesConfig)
 	t.Cleanup(directorService.Shutdown)
 	timings["ServiceStartup(Director)"] = time.Since(start).String()
 
 	start = time.Now()
 	setupURL := directorURL + "/dataflow/setup"
-	// TODO we'd like to replace the body with a valid OrchestrateRequest{} at some stage
 	dataflowRequest := servicedirector.OrchestrateRequest{DataflowName: "all"}
 	body, err := json.Marshal(dataflowRequest)
 	require.NoError(t, err)
 	resp, err := http.Post(setupURL, "application/json", bytes.NewBuffer(body))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode, "Director setup call should succeed")
-	err = resp.Body.Close()
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to close response body")
-	}
-	// we could also just get the ServiceManager if we wanted - but we'd need to change teardown as well
-	//provResources, err := directorService.GetServiceManager().SetupDataflow(totalTestContext, servicesConfig, dataflowName)
-	//require.NoError(t, err)
-	//log.Info().Int("tables", len(provResources.BigQueryTables)).Msg("provisioned")
-
+	require.NoError(t, resp.Body.Close())
 	timings["CloudResourceSetup(Director)"] = time.Since(start).String()
 
 	t.Cleanup(func() {
@@ -182,25 +149,24 @@ func TestFullDataflowE2E(t *testing.T) {
 	})
 
 	start = time.Now()
-	var ingestionSvc microservice.Service
-	require.Eventually(t, func() bool {
-		ingestionSvc = startIngestionService(t, logger.With().Str("service", "ingestion").Logger(), directorURL, mqttContainer.EmulatorAddress, projectID, uniqueTopicID, dataflowName)
-		return err == nil
-	}, 30*time.Second, 5*time.Second)
+	ingestionSvc := startIngestionService(t, totalTestContext, logger.With().Str("service", "ingestion").Logger(), directorURL, mqttContainer.EmulatorAddress, projectID, uniqueTopicID, dataflowName)
 	timings["ServiceStartup(Ingestion)"] = time.Since(start).String()
 	t.Cleanup(ingestionSvc.Shutdown)
 
 	start = time.Now()
+	// --- THE FIX ---
+	// Declare the error variable and correctly assign the service to bqSvc.
 	var bqSvc microservice.Service
+	var bqSvcErr error
 	require.Eventually(t, func() bool {
-		_ = startBigQueryService(t, logger.With().Str("service", "bigquery").Logger(), directorURL, projectID, uniqueSubID, uniqueDatasetID, uniqueTableID, dataflowName)
-		return true
-	}, 30*time.Second, 5*time.Second)
+		bqSvc, bqSvcErr = startBigQueryService(t, totalTestContext, logger.With().Str("service", "bigquery").Logger(), directorURL, projectID, uniqueSubID, uniqueDatasetID, uniqueTableID, dataflowName)
+		return bqSvcErr == nil
+	}, 30*time.Second, 5*time.Second, "BigQuery service failed to start")
+	// --- END FIX ---
 	timings["ServiceStartup(BigQuery)"] = time.Since(start).String()
 	t.Cleanup(bqSvc.Shutdown)
 	logger.Info().Msg("All services started successfully.")
 
-	// 4. Run Load Generator
 	loadgenStart := time.Now()
 	logger.Info().Msg("Starting MQTT load generator...")
 	loadgenClient := loadgen.NewMqttClient(mqttContainer.EmulatorAddress, "devices/%s/data", 1, logger)
@@ -216,31 +182,26 @@ func TestFullDataflowE2E(t *testing.T) {
 	timings["LoadGeneration"] = time.Since(loadgenStart).String()
 	logger.Info().Int("published_count", publishedCount).Msg("Load generator finished.")
 
-	// 5. Verify results in BigQuery
 	verificationStart := time.Now()
 	logger.Info().Msg("Starting BigQuery verification...")
 
-	// Define a simple validator that checks the final row count.
 	countValidator := func(t *testing.T, iter *bq.RowIterator) error {
 		var rowCount int
-		// We don't need to unmarshal the row data, just iterate to count them.
 		for {
 			var row map[string]bq.Value
-			err = iter.Next(&row)
+			err := iter.Next(&row)
 			if errors.Is(err, iterator.Done) {
 				break
 			}
 			if err != nil {
-				return err // The verifier will fail the test if an error occurs here.
+				return err
 			}
 			rowCount++
 		}
-		// Assert that the final count matches the number of published messages.
 		require.Equal(t, publishedCount, rowCount, "the final number of rows in BigQuery should match the number of messages published")
-		return nil // Return nil for a successful validation.
+		return nil
 	}
 
-	// Call the generic verifier with the count-checking validator.
 	verifyBigQueryRows(t, logger, totalTestContext, projectID, uniqueDatasetID, uniqueTableID, publishedCount, countValidator)
 
 	timings["VerificationDuration"] = time.Since(verificationStart).String()

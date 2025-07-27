@@ -164,7 +164,7 @@ func TestEnrichmentE2E_HappyPath(t *testing.T) {
 	}
 
 	start = time.Now()
-	ingestionSvc := startIngestionService(t, logger, directorURL, mqttConn.EmulatorAddress, projectID, ingestionTopicID, dataflowName)
+	ingestionSvc := startIngestionService(t, totalTestContext, logger, directorURL, mqttConn.EmulatorAddress, projectID, ingestionTopicID, dataflowName)
 
 	timings["ServiceStartup(Ingestion)"] = time.Since(start).String()
 	t.Cleanup(ingestionSvc.Shutdown)
@@ -188,25 +188,35 @@ func TestEnrichmentE2E_HappyPath(t *testing.T) {
 			logger.Error().Err(err).Msg("Failed to unmarshal enriched message for verification.")
 			return false
 		}
-		if enrichedPayload.DeviceInfo == nil {
-			logger.Error().Msg("Enriched message missing DeviceInfo.")
+		if enrichedPayload.EnrichmentData == nil {
+			logger.Error().Msg("Enriched message missing EnrichmentData.")
 			return false
 		}
-		expectedClientID, clientIDFound := deviceToClientID[enrichedPayload.DeviceInfo.UID]
+
+		// The UID is now expected in the original message attributes, not the enrichment data.
+		uid, uidOk := msg.Attributes["uid"]
+		if !uidOk {
+			logger.Error().Msg("Message is missing 'uid' attribute for verification.")
+			return false
+		}
+
+		expectedClientID, clientIDFound := deviceToClientID[uid]
 		if !clientIDFound {
-			logger.Error().Str("device_id", enrichedPayload.DeviceInfo.UID).Msg("DeviceID not found in expected map during verification.")
+			logger.Error().Str("device_id", uid).Msg("DeviceID not found in expected map during verification.")
 			return false
 		}
-		if enrichedPayload.DeviceInfo.Name != expectedClientID {
-			logger.Error().Str("expected_client_id", expectedClientID).Str("actual_client_id", enrichedPayload.DeviceInfo.Name).Msg("ClientID mismatch.")
+
+		// Safely check the map values with type assertions.
+		if name, ok := enrichedPayload.EnrichmentData["name"].(string); !ok || name != expectedClientID {
+			logger.Error().Str("expected_client_id", expectedClientID).Interface("actual_name", enrichedPayload.EnrichmentData["name"]).Msg("Enrichment 'name' mismatch.")
 			return false
 		}
-		if enrichedPayload.DeviceInfo.Location != "loc-456" {
-			logger.Error().Str("actual_location_id", enrichedPayload.DeviceInfo.Location).Msg("LocationID mismatch.")
+		if location, ok := enrichedPayload.EnrichmentData["location"].(string); !ok || location != "loc-456" {
+			logger.Error().Interface("actual_location", enrichedPayload.EnrichmentData["location"]).Msg("Enrichment 'location' mismatch.")
 			return false
 		}
-		if enrichedPayload.DeviceInfo.ServiceTag != "cat-789" {
-			logger.Error().Str("actual_category", enrichedPayload.DeviceInfo.ServiceTag).Msg("DeviceCategory mismatch.")
+		if category, ok := enrichedPayload.EnrichmentData["serviceTag"].(string); !ok || category != "cat-789" {
+			logger.Error().Interface("actual_category", enrichedPayload.EnrichmentData["serviceTag"]).Msg("Enrichment 'serviceTag' mismatch.")
 			return false
 		}
 		return true

@@ -75,13 +75,8 @@ func TestDevflowE2E(t *testing.T) {
 	client, err := pubsub.NewClient(totalTestContext, projectID)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		client.Close()
+		_ = client.Close()
 	})
-
-	//commandTopic := fmt.Sprintf("dev-command-topic-%s", runID)
-	//commandSubscription := fmt.Sprintf("dev-command-subscription-%s", runID)
-	//completionTopic := fmt.Sprintf("dev-completion-topic-%s", runID)
-	//setupCommandInfrastructure(t, totalTestContext, client, commandTopic, commandSubscription, completionTopic)
 
 	// 2. Build the services definition in memory using the new architecture struct.
 	servicesConfig := &servicemanager.MicroserviceArchitecture{
@@ -119,16 +114,17 @@ func TestDevflowE2E(t *testing.T) {
 	logger.Info().Str("url", directorURL).Msg("ServiceDirector is healthy")
 
 	// 4. Set up resources via the director's API
-	//start = time.Now()
-	//setupURL := directorURL + "/dataflow/setup"
-	//resp, err := http.Post(setupURL, "application/json", nil)
-	//require.NoError(t, err)
-	//require.Equal(t, http.StatusOK, resp.StatusCode, "ServiceDirector setup request failed")
-	//resp.Body.Close()
-	_, err = directorService.GetServiceManager().SetupDataflow(totalTestContext, servicesConfig, dataflowName)
-	if err != nil {
-		logger.Error().Err(err).Str("url", directorURL).Msg("Failed to setup dataflow")
-	}
+	start = time.Now()
+	setupURL := directorURL + "/dataflow/setup"
+	resp, err := http.Post(setupURL, "application/json", nil)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "ServiceDirector setup request failed")
+	_ = resp.Body.Close()
+	// We could call the servicemanager directly if we wanted
+	//_, err = directorService.GetServiceManager().SetupDataflow(totalTestContext, servicesConfig, dataflowName)
+	//if err != nil {
+	//	logger.Error().Err(err).Str("url", directorURL).Msg("Failed to setup dataflow")
+	//}
 	timings["CloudResourceSetup(Director)"] = time.Since(start).String()
 	logger.Info().Msg("ServiceDirector confirmed resource setup is complete.")
 
@@ -140,7 +136,7 @@ func TestDevflowE2E(t *testing.T) {
 		cleanupResp, cleanupErr := http.DefaultClient.Do(req)
 		if cleanupErr == nil {
 			require.Equal(t, http.StatusOK, cleanupResp.StatusCode, "Teardown request failed")
-			cleanupResp.Body.Close()
+			_ = cleanupResp.Body.Close()
 			logger.Info().Msg("ServiceDirector confirmed resource teardown.")
 		} else {
 			t.Logf("Failed to send teardown request: %v", cleanupErr)
@@ -150,10 +146,10 @@ func TestDevflowE2E(t *testing.T) {
 
 	// 5. Start Ingestion Service
 	start = time.Now()
-	ingestionLogger := logger.With().Str("service", "ingestion").Logger()
+	ingestionLogger := logger.With().Str("source", "devflow").Logger()
 	var ingestionService microservice.Service
 	require.Eventually(t, func() bool {
-		ingestionService = startIngestionService(t, ingestionLogger, directorURL, mqttContainer.EmulatorAddress, projectID, verifyTopicID, dataflowName)
+		ingestionService = startIngestionService(t, totalTestContext, ingestionLogger, directorURL, mqttContainer.EmulatorAddress, projectID, verifyTopicID, dataflowName)
 		return true
 	}, 30*time.Second, 5*time.Second, "Ingestion service failed to start after multiple retries")
 	timings["ServiceStartup(Ingestion)"] = time.Since(start).String()
@@ -185,7 +181,7 @@ func TestDevflowE2E(t *testing.T) {
 	// 7. Run Load Generator
 	loadgenStart := time.Now()
 	logger.Info().Msg("Starting MQTT load generator...")
-	loadgenClient := loadgen.NewMqttClient(mqttContainer.EmulatorAddress, "devices/%s/data", 1, logger)
+	loadgenClient := loadgen.NewMqttClient(mqttContainer.EmulatorAddress, "devices/+/data", 1, logger)
 	devices := make([]*loadgen.Device, loadTestNumDevices)
 	for i := 0; i < loadTestNumDevices; i++ {
 		devices[i] = &loadgen.Device{ID: fmt.Sprintf("e2e-device-%d-%s", i, runID), MessageRate: loadTestRate, PayloadGenerator: &testPayloadGenerator{}}
