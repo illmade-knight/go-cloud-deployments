@@ -1,30 +1,37 @@
 //go:build integration
 
+// Package e2e contains end-to-end tests for dataflow pipelines.
+// This test file, replaye2e_test.go, validates a replay dataflow:
+// 1. Reads archived data from a pre-existing GCS bucket.
+// 2. Replays this data as new messages to an MQTT topic.
+// 3. A new pipeline (Ingestion -> BigQuery) processes these replayed messages.
+// 4. Verifies that the replayed data correctly lands in a new BigQuery table.
 package e2e
 
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"github.com/illmade-knight/go-test/auth"
+	"github.com/stretchr/testify/assert"
 	"net/http"
 	"os"
 	"strconv"
 	"testing"
 	"time"
 
-	bq "cloud.google.com/go/bigquery"
-	"cloud.google.com/go/pubsub"
+	"cloud.google.com/go/bigquery"
 	"cloud.google.com/go/storage"
 	"github.com/google/uuid"
+	"github.com/illmade-knight/go-cloud-deployments/dataflow/devflow/replay"
+	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
+	"github.com/illmade-knight/go-dataflow-services/pkg/ingestion"
+	"github.com/illmade-knight/go-test/emulators"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
-
-	"go-cloud-deployments/dataflow/devflow/replay"
-
-	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
-	"github.com/illmade-knight/go-test/emulators"
 )
 
 const (
@@ -35,22 +42,8 @@ func TestReplayToSimpleBigqueryFlowE2E(t *testing.T) {
 	// --- Logger and Prerequisite Checks ---
 	logger := zerolog.New(os.Stderr).With().Timestamp().Str("test", "TestReplayToSimpleBigqueryFlowE2E").Logger()
 
-	projectID := os.Getenv("GOOGLE_CLOUD_PROJECT")
-	if projectID == "" {
-		t.Skip("Skipping E2E test: GOOGLE_CLOUD_PROJECT env var must be set.")
-	}
-	if os.Getenv("GOOGLE_APPLICATION_CREDENTIALS") == "" {
-		logger.Warn().Msg("GOOGLE_APPLICATION_CREDENTIALS not set, relying on Application Default Credentials (ADC).")
-		adcCheckCtx, adcCheckCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer adcCheckCancel()
-		realPubSubClient, errAdc := pubsub.NewClient(adcCheckCtx, projectID)
-		if errAdc != nil {
-			t.Skipf("Skipping cloud test: ADC check failed: %v. Please configure ADC or set GOOGLE_APPLICATION_CREDENTIALS.", errAdc)
-		}
-		realPubSubClient.Close()
-	}
+	projectID := auth.CheckGCPAuth(t)
 
-	// This bucket MUST exist and contain data from a previous test run.
 	sourceGCSBucketName := os.Getenv("REPLAY_GCS_BUCKET_NAME")
 	if sourceGCSBucketName == "" {
 		t.Skip("Skipping replay test: Please set 'REPLAY_GCS_BUCKET_NAME' env var with a bucket containing archived messages.")
@@ -76,7 +69,7 @@ func TestReplayToSimpleBigqueryFlowE2E(t *testing.T) {
 	})
 
 	totalTestContext, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
+	t.Cleanup(cancel)
 
 	// 1. Define unique resources for this REPLAY run.
 	runID := uuid.New().String()[:8]
@@ -87,13 +80,10 @@ func TestReplayToSimpleBigqueryFlowE2E(t *testing.T) {
 	replayTableID := fmt.Sprintf("replay_ingested_payloads_%s", runID)
 
 	// 2. Build the services definition in memory for the target replay flow.
-	schemaIdentifier := "github.com/illmade-knight/go-iot-dataflows/dataflow/devflow/e2e.TestPayload"
+	schemaIdentifier := "github.com/illmade-knight/go-dataflow-services/dataflow/devflow/e2e.TestPayload"
+	servicemanager.RegisterSchema(schemaIdentifier, TestPayload{})
 	servicesConfig := &servicemanager.MicroserviceArchitecture{
-		Environment: servicemanager.Environment{
-			Name:      "e2e-replay",
-			ProjectID: projectID,
-			Location:  "US",
-		},
+		Environment: servicemanager.Environment{Name: "e2e-replay", ProjectID: projectID, Location: "US"},
 		Dataflows: map[string]servicemanager.ResourceGroup{
 			replayDataflowName: {
 				Name:      replayDataflowName,
@@ -102,13 +92,7 @@ func TestReplayToSimpleBigqueryFlowE2E(t *testing.T) {
 					Topics:           []servicemanager.TopicConfig{{CloudResource: servicemanager.CloudResource{Name: replayIngestionTopicID}}},
 					Subscriptions:    []servicemanager.SubscriptionConfig{{CloudResource: servicemanager.CloudResource{Name: replayBigquerySubID}, Topic: replayIngestionTopicID}},
 					BigQueryDatasets: []servicemanager.BigQueryDataset{{CloudResource: servicemanager.CloudResource{Name: replayDatasetID}}},
-					BigQueryTables: []servicemanager.BigQueryTable{
-						{
-							CloudResource: servicemanager.CloudResource{Name: replayTableID},
-							Dataset:       replayDatasetID,
-							SchemaType:    schemaIdentifier,
-						},
-					},
+					BigQueryTables:   []servicemanager.BigQueryTable{{CloudResource: servicemanager.CloudResource{Name: replayTableID}, Dataset: replayDatasetID, SchemaType: schemaIdentifier}},
 				},
 			},
 		},
@@ -119,65 +103,70 @@ func TestReplayToSimpleBigqueryFlowE2E(t *testing.T) {
 	if creds := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"); creds != "" {
 		opts = append(opts, option.WithCredentialsFile(creds))
 	}
-	start := time.Now()
 	mqttConn := emulators.SetupMosquittoContainer(t, totalTestContext, emulators.GetDefaultMqttImageContainer())
-	timings["EmulatorSetup(MQTT)"] = time.Since(start).String()
 
-	bqClient, err := bq.NewClient(totalTestContext, projectID, opts...)
+	bqClient, err := bigquery.NewClient(totalTestContext, projectID, opts...)
 	require.NoError(t, err)
-	defer bqClient.Close()
+	t.Cleanup(func() { assert.NoError(t, bqClient.Close()) })
 
 	gcsClient, err := storage.NewClient(totalTestContext, opts...)
 	require.NoError(t, err)
-	defer gcsClient.Close()
+	t.Cleanup(func() { assert.NoError(t, gcsClient.Close()) })
 
 	// 4. Read messages from the EXISTING GCS bucket.
-	logger.Info().Str("bucket", sourceGCSBucketName).Msg("Reading messages from GCS for replay...")
 	deviceMessagesToReplay, err := replay.ReadMessagesFromGCS(t, totalTestContext, logger, gcsClient, sourceGCSBucketName)
-	require.NoError(t, err, "Failed to read messages from GCS bucket %s", sourceGCSBucketName)
+	require.NoError(t, err)
 
 	replayDevices, totalMessages := replay.CreateReplayDevices(t, logger, deviceMessagesToReplay, replayToBigqueryMessagesFor)
 	expectedReplayCount = totalMessages
-	logger.Info().Int("count", expectedReplayCount).Msg("Messages loaded from GCS and replay devices created.")
-	require.Greater(t, expectedReplayCount, 0, "No messages found in GCS bucket %s to replay. Ensure the bucket was populated.", sourceGCSBucketName)
+	require.Greater(t, expectedReplayCount, 0, "No messages found in GCS bucket %s to replay.", sourceGCSBucketName)
 
 	// 5. Start services for the new replay dataflow pipeline.
-	start = time.Now()
 	directorService, directorURL := startServiceDirector(t, totalTestContext, logger.With().Str("service", "servicedirector").Logger(), servicesConfig)
-	t.Cleanup(directorService.Shutdown)
-	timings["ServiceStartup(Director)"] = time.Since(start).String()
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		directorService.Shutdown(shutdownCtx)
+	})
 
-	start = time.Now()
 	setupURL := directorURL + "/dataflow/setup"
 	resp, err := http.Post(setupURL, "application/json", bytes.NewBuffer([]byte{}))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	resp.Body.Close()
-	timings["CloudResourceSetup(Director)"] = time.Since(start).String()
+	_ = resp.Body.Close()
 
 	t.Cleanup(func() {
-		teardownStart := time.Now()
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cleanupCancel()
 		logger.Info().Msg("Requesting resource teardown from ServiceDirector for replay flow...")
 		teardownURL := directorURL + "/orchestrate/teardown"
-		req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, teardownURL, nil)
-		http.DefaultClient.Do(req)
+		req, _ := http.NewRequestWithContext(cleanupCtx, http.MethodPost, teardownURL, nil)
+		_, _ = http.DefaultClient.Do(req)
 		ds := bqClient.Dataset(replayDatasetID)
-		if err := ds.DeleteWithContents(context.Background()); err != nil {
+		if err := ds.DeleteWithContents(cleanupCtx); err != nil {
 			logger.Warn().Err(err).Str("dataset", replayDatasetID).Msg("Failed to delete BigQuery dataset during replay cleanup.")
 		}
-		timings["CloudResourceTeardown(Director)"] = time.Since(teardownStart).String()
 	})
 
-	start = time.Now()
-	ingestionSvc := startIngestionService(t, totalTestContext, logger, directorURL, mqttConn.EmulatorAddress, projectID, replayIngestionTopicID, replayDataflowName)
-	timings["ServiceStartup(Ingestion)"] = time.Since(start).String()
-	t.Cleanup(ingestionSvc.Shutdown)
+	cfg := ingestion.LoadConfigDefaults(projectID)
+	cfg.DataflowName = replayDataflowName
+	cfg.ServiceDirectorURL = directorURL
+	cfg.MQTT.BrokerURL = mqttConn.EmulatorAddress
+	cfg.OutputTopicID = replayIngestionTopicID
+	ingestionLogger := logger.With().Str("service", "ingestion").Logger()
+	ingestionSvc := startIngestionService(t, totalTestContext, ingestionLogger, cfg)
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		_ = ingestionSvc.Shutdown(shutdownCtx)
+	})
 
-	start = time.Now()
-	bqSvc, err := startBigQueryService(t, totalTestContext, logger, directorURL, projectID, replayBigquerySubID, replayDatasetID, replayTableID, replayDataflowName)
-	require.NoError(t, err)
-	timings["ServiceStartup(BigQuery)"] = time.Since(start).String()
-	t.Cleanup(bqSvc.Shutdown)
+	bqSvc := startBigQueryService(t, totalTestContext, logger, projectID, replayBigquerySubID, replayDatasetID, replayTableID, bqTransformer)
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		_ = bqSvc.Shutdown(shutdownCtx)
+	})
 	logger.Info().Msg("Replay target services started successfully.")
 
 	// 6. Replay messages to MQTT emulator.
@@ -192,12 +181,12 @@ func TestReplayToSimpleBigqueryFlowE2E(t *testing.T) {
 	verificationStart := time.Now()
 	logger.Info().Msg("Starting BigQuery verification for replayed messages...")
 
-	countValidator := func(t *testing.T, iter *bq.RowIterator) error {
+	countValidator := func(t *testing.T, iter *bigquery.RowIterator) error {
 		var rowCount int
 		for {
-			var row map[string]bq.Value
+			var row map[string]bigquery.Value
 			err := iter.Next(&row)
-			if err == iterator.Done {
+			if errors.Is(err, iterator.Done) {
 				break
 			}
 			if err != nil {
@@ -210,7 +199,5 @@ func TestReplayToSimpleBigqueryFlowE2E(t *testing.T) {
 	}
 
 	verifyBigQueryRows(t, logger, totalTestContext, projectID, replayDatasetID, replayTableID, replayedCount, countValidator)
-
 	timings["VerificationDuration"] = time.Since(verificationStart).String()
-	timings["ProcessingAndVerificationLatency"] = time.Since(replayStart).String()
 }

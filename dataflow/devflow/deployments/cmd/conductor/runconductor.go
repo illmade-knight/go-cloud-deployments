@@ -27,21 +27,33 @@ func main() {
 	defer cancel()
 
 	// --- 1. Define flags for command-line control ---
-	projectID := flag.String("project-id", "", "GCP Project ID (required)")
-	teardown := flag.Bool("teardown", false, "If true, tear down all deployed services instead of deploying")
+	projectID := flag.String("project-id", "", "GCP Project ID (required).")
+	teardown := flag.Bool("teardown", false, "If true, tear down all deployed services instead of deploying.")
 
-	// Add new flags for each step of the conductor's run, defaulting to true.
-	runSetupIAM := flag.Bool("run-setup-iam", true, "Execute Step 1: Set up IAM for the ServiceDirector.")
-	runDeployDirector := flag.Bool("run-deploy-director", true, "Execute Step 2: Deploy the ServiceDirector service.")
-	runSetupResources := flag.Bool("run-setup-resources", true, "Execute Step 3: Trigger creation of dataflow resources.")
-	runApplyIAM := flag.Bool("run-apply-iam", true, "Execute Step 4: Apply IAM policies for dataflow services.")
-	runDeployServices := flag.Bool("run-deploy-services", true, "Execute Step 5: Deploy all dataflow microservices.")
-	directorURLOverride := flag.String("director-url", "", "Override for the ServiceDirector URL if its deployment is skipped.")
+	runSetupIAM := flag.Bool("run-setup-iam", true, "Step 1: Set up IAM for the ServiceDirector.")
+	runDeployDirector := flag.Bool("run-deploy-director", true, "Step 2: Deploy the ServiceDirector service.")
+	runSetupResources := flag.Bool("run-setup-resources", true, "Step 3: Trigger creation of dataflow resources.")
+	runApplyIAM := flag.Bool("run-apply-iam", true, "Step 4: Apply IAM policies for dataflow services.")
+	runDeployServices := flag.Bool("run-deploy-services", true, "Step 5: Deploy all dataflow microservices.")
+
+	// REFACTOR: Updated the help text to be more explicit about when this flag is needed.
+	directorURLOverride := flag.String("director-url", "", "URL of an existing ServiceDirector. Required if -run-deploy-director=false.")
+
+	// REFACTOR: Add a custom usage message to provide detailed help.
+	flag.Usage = func() {
+		_, _ = fmt.Fprintf(os.Stderr, "Conductor - A tool for deploying a full microservice architecture.\n\n")
+		_, _ = fmt.Fprintf(os.Stderr, "This tool reads a services.yaml file, hydrates it with project-specific details,\n")
+		_, _ = fmt.Fprintf(os.Stderr, "and orchestrates the deployment of IAM, resources, and services in a specific order.\n\n")
+		_, _ = fmt.Fprintf(os.Stderr, "Usage:\n")
+		_, _ = fmt.Fprintf(os.Stderr, "  conductor [options]\n\n")
+		_, _ = fmt.Fprintf(os.Stderr, "Options:\n")
+		flag.PrintDefaults()
+	}
 
 	flag.Parse()
 
 	if *projectID == "" {
-		log.Fatal().Msg("Missing required flag: -project-id")
+		log.Fatal().Msg("Missing required flag: -project-id. Use -h or -help for more information.")
 	}
 
 	// --- 2. Load and configure the architecture ---
@@ -62,7 +74,6 @@ func main() {
 	if *teardown {
 		runTeardown(ctx, &arch, log.Logger)
 	} else {
-		// Populate the options from the command-line flags.
 		opts := orchestration.ConductorOptions{
 			SetupServiceDirectorIAM: *runSetupIAM,
 			DeployServiceDirector:   *runDeployDirector,
@@ -83,7 +94,6 @@ func runDeployment(ctx context.Context, arch *servicemanager.MicroserviceArchite
 		log.Fatal().Err(err).Msg("Failed to create conductor")
 	}
 
-	// This single call orchestrates everything based on the provided options.
 	if err := conductor.Run(ctx); err != nil {
 		log.Fatal().Err(err).Msg("Conductor run failed")
 	}
@@ -94,27 +104,21 @@ func runDeployment(ctx context.Context, arch *servicemanager.MicroserviceArchite
 func runTeardown(ctx context.Context, arch *servicemanager.MicroserviceArchitecture, logger zerolog.Logger) {
 	log.Info().Msg("Starting teardown...")
 
-	// To tear down the deployed services, we need access to the Orchestrator's
-	// specific teardown helpers, just like in the tests.
 	orch, err := orchestration.NewOrchestrator(ctx, arch, logger)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to create orchestrator for teardown")
 	}
 
-	// Tear down application services first.
 	for dfName := range arch.Dataflows {
 		if err := orch.TeardownDataflowServices(ctx, dfName); err != nil {
 			log.Error().Err(err).Str("dataflow", dfName).Msg("Failed to tear down dataflow services")
 		}
 	}
 
-	// Then tear down the ServiceDirector itself.
 	if err := orch.TeardownCloudRunService(ctx, arch.ServiceManagerSpec.Name); err != nil {
 		log.Error().Err(err).Msg("Failed to tear down ServiceDirector service")
 	}
 
-	// Finally, tear down the conductor's own framework resources (IAM, topics).
-	// Create a conductor with default options just for teardown.
 	conductor, _ := orchestration.NewConductor(ctx, arch, logger, orchestration.ConductorOptions{})
 	if err := conductor.Teardown(ctx); err != nil {
 		log.Error().Err(err).Msg("Conductor framework teardown failed")

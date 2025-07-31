@@ -1,23 +1,26 @@
 //go:build integration
 
+// Package e2e contains end-to-end tests for dataflow pipelines.
+// This test file, devflow_test.go, validates a basic ingestion dataflow:
+// MQTT -> Ingestion Service -> Pub/Sub.
+// It serves as a simple health check for the ingestion service.
 package e2e
 
 import (
 	"context"
 	"fmt"
 	"net/http"
-	"os"
 	"strconv"
 	"testing"
 	"time"
 
-	"github.com/illmade-knight/go-cloud-manager/microservice"
-	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
-	"github.com/illmade-knight/go-test/emulators"
-	"github.com/illmade-knight/go-test/loadgen"
-
 	"cloud.google.com/go/pubsub"
 	"github.com/google/uuid"
+	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
+	"github.com/illmade-knight/go-dataflow-services/pkg/ingestion"
+	"github.com/illmade-knight/go-test/auth"
+	"github.com/illmade-knight/go-test/emulators"
+	"github.com/illmade-knight/go-test/loadgen"
 	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/require"
 )
@@ -32,16 +35,9 @@ const (
 func TestDevflowE2E(t *testing.T) {
 
 	totalTestContext, cancel := context.WithTimeout(context.Background(), totalDevflowTestDuration)
-	defer cancel()
+	t.Cleanup(cancel)
 
-	projectID := os.Getenv("GOOGLE_CLOUD_PROJECT")
-	if projectID == "" {
-		t.Skip("Skipping E2E test: GOOGLE_CLOUD_PROJECT env var must be set.")
-	}
-	if os.Getenv("GOOGLE_APPLICATION_CREDENTIALS") == "" {
-		log.Warn().Msg("GOOGLE_APPLICATION_CREDENTIALS not set, relying on Application Default Credentials (ADC).")
-		checkGCPAuth(t)
-	}
+	projectID := auth.CheckGCPAuth(t)
 
 	// --- Timing & Metrics Setup ---
 	timings := make(map[string]string)
@@ -78,7 +74,7 @@ func TestDevflowE2E(t *testing.T) {
 		_ = client.Close()
 	})
 
-	// 2. Build the services definition in memory using the new architecture struct.
+	// 2. Build the services definition in memory.
 	servicesConfig := &servicemanager.MicroserviceArchitecture{
 		Environment: servicemanager.Environment{
 			Name:      "e2e-devflow",
@@ -107,9 +103,12 @@ func TestDevflowE2E(t *testing.T) {
 
 	start = time.Now()
 	directorLogger := logger.With().Str("service", "servicedirector").Logger()
-
 	directorService, directorURL := startServiceDirector(t, totalTestContext, directorLogger, servicesConfig)
-	t.Cleanup(directorService.Shutdown)
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		directorService.Shutdown(shutdownCtx)
+	})
 	timings["ServiceStartup(Director)"] = time.Since(start).String()
 	logger.Info().Str("url", directorURL).Msg("ServiceDirector is healthy")
 
@@ -120,19 +119,16 @@ func TestDevflowE2E(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode, "ServiceDirector setup request failed")
 	_ = resp.Body.Close()
-	// We could call the servicemanager directly if we wanted
-	//_, err = directorService.GetServiceManager().SetupDataflow(totalTestContext, servicesConfig, dataflowName)
-	//if err != nil {
-	//	logger.Error().Err(err).Str("url", directorURL).Msg("Failed to setup dataflow")
-	//}
 	timings["CloudResourceSetup(Director)"] = time.Since(start).String()
 	logger.Info().Msg("ServiceDirector confirmed resource setup is complete.")
 
 	t.Cleanup(func() {
 		teardownStart := time.Now()
 		logger.Info().Msg("Test finished. Requesting resource teardown from ServiceDirector...")
+		teardownCtx, teardownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer teardownCancel()
 		teardownURL := directorURL + "/orchestrate/teardown"
-		req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, teardownURL, nil)
+		req, _ := http.NewRequestWithContext(teardownCtx, http.MethodPost, teardownURL, nil)
 		cleanupResp, cleanupErr := http.DefaultClient.Do(req)
 		if cleanupErr == nil {
 			require.Equal(t, http.StatusOK, cleanupResp.StatusCode, "Teardown request failed")
@@ -147,13 +143,20 @@ func TestDevflowE2E(t *testing.T) {
 	// 5. Start Ingestion Service
 	start = time.Now()
 	ingestionLogger := logger.With().Str("source", "devflow").Logger()
-	var ingestionService microservice.Service
-	require.Eventually(t, func() bool {
-		ingestionService = startIngestionService(t, totalTestContext, ingestionLogger, directorURL, mqttContainer.EmulatorAddress, projectID, verifyTopicID, dataflowName)
-		return true
-	}, 30*time.Second, 5*time.Second, "Ingestion service failed to start after multiple retries")
+	cfg := ingestion.LoadConfigDefaults(projectID)
+	cfg.DataflowName = dataflowName
+	cfg.ServiceDirectorURL = directorURL
+	cfg.OutputTopicID = verifyTopicID
+	cfg.ProjectID = projectID
+	cfg.MQTT.Topic = "devices/+/data"
+	cfg.MQTT.BrokerURL = mqttContainer.EmulatorAddress
+	ingestionService := startIngestionService(t, totalTestContext, ingestionLogger, cfg)
 	timings["ServiceStartup(Ingestion)"] = time.Since(start).String()
-	t.Cleanup(ingestionService.Shutdown)
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		_ = ingestionService.Shutdown(shutdownCtx)
+	})
 	logger.Info().Msg("Ingestion service started successfully.")
 
 	// 6. Start the Pub/Sub verifier in the background.

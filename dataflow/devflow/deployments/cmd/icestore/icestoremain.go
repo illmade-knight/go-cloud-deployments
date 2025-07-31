@@ -5,66 +5,66 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
-	"github.com/illmade-knight/go-iot-dataflows/pkg/icestore"
+	"github.com/illmade-knight/go-dataflow-services/pkg/icestore"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
 
 func main() {
-	// Configure zerolog for console-friendly output.
-
-	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
-
+	logger := log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
+	zerolog.SetGlobalLevel(zerolog.InfoLevel)
 	ctx := context.Background()
 
-	// Load configuration using the flexible method that supports flags,
-	// environment variables, and a config file.
-	cfg, err := icestore.LoadConfig()
-	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to load icestore service config")
+	projectID := os.Getenv("GOOGLE_CLOUD_PROJECT")
+	if projectID == "" {
+		logger.Fatal().Msg("GOOGLE_CLOUD_PROJECT environment variable not set")
 	}
+	cfg := icestore.LoadConfigDefaults(projectID)
 
-	// Set the global log level from the loaded configuration.
-	logLevel, err := zerolog.ParseLevel(cfg.LogLevel)
-	if err != nil {
-		logLevel = zerolog.InfoLevel // Default to info level on parsing error
-		log.Warn().Err(err).Str("log_level", cfg.LogLevel).Msg("Could not parse log level, defaulting to 'info'")
+	// Override defaults with environment variables
+	if port := os.Getenv("PORT"); port != "" {
+		cfg.HTTPPort = ":" + port
 	}
-	zerolog.SetGlobalLevel(logLevel)
+	if subID := os.Getenv("INPUT_SUBSCRIPTION_ID"); subID != "" {
+		cfg.InputSubscriptionID = subID
+	}
+	if bucketName := os.Getenv("BUCKET_NAME"); bucketName != "" {
+		cfg.IceStore.BucketName = bucketName
+	}
+	if bucketPrefix := os.Getenv("BUCKET_PREFIX"); bucketPrefix != "" {
+		cfg.IceStore.ObjectPrefix = bucketPrefix
+	}
 
 	logger.Info().
 		Str("project_id", cfg.ProjectID).
-		Str("service_name", cfg.ServiceName).
-		Str("dataflow_name", cfg.DataflowName).
-		Str("subscription_id", cfg.Consumer.SubscriptionID).
+		Str("subscription_id", cfg.InputSubscriptionID).
 		Str("gcs_bucket", cfg.IceStore.BucketName).
-		Str("log_level", logLevel.String()).
 		Msg("Preparing to start IceStore service")
 
-	// The NewIceStoreServiceWrapper constructor assembles the entire pipeline,
-	// including the consumer, batcher, and uploader.
 	iceStoreService, err := icestore.NewIceStoreServiceWrapper(ctx, cfg, logger)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to create IceStore Service")
 	}
 
-	// Start the service (which includes the HTTP server and the message processing pipeline).
-	// This is a non-blocking call.
-	if err := iceStoreService.Start(); err != nil {
-		log.Fatal().Err(err).Msg("Failed to start IceStore Service")
-	}
+	go func() {
+		if err := iceStoreService.Start(ctx); err != nil {
+			log.Fatal().Err(err).Msg("Failed to start IceStore Service")
+		}
+	}()
 	log.Info().Str("port", iceStoreService.GetHTTPPort()).Msg("IceStore Service is running")
 
-	// Set up a channel to listen for OS shutdown signals.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-
-	// Block until a shutdown signal is received.
 	<-quit
 	log.Info().Msg("Shutdown signal received, stopping IceStore Service...")
 
-	// Gracefully shut down the service, which will flush any pending batches.
-	iceStoreService.Shutdown()
-	log.Info().Msg("IceStore Service stopped.")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := iceStoreService.Shutdown(shutdownCtx); err != nil {
+		logger.Error().Err(err).Msg("IceStore Service shutdown failed")
+	} else {
+		log.Info().Msg("IceStore Service stopped.")
+	}
 }

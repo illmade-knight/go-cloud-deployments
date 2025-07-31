@@ -1,7 +1,5 @@
 # services.yaml
 name: "bigquery-dataflow"
-# CORRECTED: 'region' is now a top-level key because the Environment
-# struct is inlined in the Go code.
 region: "europe-west2"
 
 # service_manager_spec describes the ServiceDirector service itself.
@@ -34,16 +32,14 @@ dataflows:
           source_path: "."
           buildable_module_path: "cmd/ingestion" # Path to your ingestion service code
           secret_environment_vars:
-            - name: "APP_MQTT_PASSWORD"
+            - name: "MQTT_PASSWORD"
               value_from: "SERVICE_PASS" # The name of the secret in Secret Manager
           environment_vars:
-            # The service needs to know which Pub/Sub topic to publish to.
-            TOPIC_ID: "ingestion-topic-bq"
-            # TODO get rid of one of these - no duplication - better setup
-            APP_PRODUCER_TOPIC_ID: "ingestion-topic-bq"
-            # Add other necessary config like MQTT broker URL
-            APP_MQTT_BROKER_URL: "tcp://mochi-885150127230.us-central1.run.app:1883"
-            APP_MQTT_USERNAME: "sreceiver"
+            # REMOVED: PUBSUB_TOPIC_ID is now injected by the hydration step.
+            MQTT_BROKER_URL: "tcp://mochi-885150127230.us-central1.run.app:1883"
+            MQTT_USERNAME: "sreceiver"
+            MQTT_TOPIC: "devices/+/data"
+            MQTT_CLIENT_ID: "test-client-devflow"
 
       bigquery-service:
         name: "bigquery-service"
@@ -54,25 +50,26 @@ dataflows:
           source_path: "."
           buildable_module_path: "cmd/bigquery" # Path to your BigQuery service code
           environment_vars:
-            # The service needs to know which subscription and BQ table to use.
-            SUBSCRIPTION_ID: "bq-subscription"
-            DATASET_ID: "iot_data_bq"
-            TABLE_ID: "ingested_payloads_bq"
+            # REMOVED: SUBSCRIPTION_ID is now injected by the hydration step.
+            BIGQUERY_DATASET: "iot_data_bq"
+            BIGQUERY_TABLE: "ingested_payloads_bq"
 
     # resources lists the cloud infrastructure the ServiceDirector must create
     # BEFORE the application services are deployed.
     resources:
       topics:
         - name: "ingestion-topic-bq"
+          # ADDED: Explicitly link this topic to its producer service.
+          producer_service: "ingestion-service"
       subscriptions:
         - name: "bq-subscription"
           topic: "ingestion-topic-bq"
+          # ADDED: Explicitly link this subscription to its consumer service.
+          consumer_service: "bigquery-service"
       bigquery_datasets:
         - name: "iot_data_bq"
       bigquery_tables:
         - name: "ingested_payloads_bq"
           dataset: "iot_data_bq"
-          # The ServiceDirector uses this to find the schema struct in its code.
-          schema_type: "github.com/illmade-knight/go-iot-dataflows/dataflow/devflow/EnrichedTestPayload"
-          # Example of adding clustering for performance.
+          schema_type: "github.com/illmade-knight/go-dataflow-service/dataflow/devflow/EnrichedTestPayload"
           clustering_fields: ["device_id"]

@@ -1,4 +1,4 @@
-module go-cloud-deployments
+module github.com/illmade-knight/go-cloud-deployments
 
 go 1.23.0
 
@@ -6,16 +6,19 @@ require (
 	cloud.google.com/go/bigquery v1.69.0
 	cloud.google.com/go/cloudbuild v1.22.2
 	cloud.google.com/go/firestore v1.18.0
-	cloud.google.com/go/pubsub v1.49.0
+	cloud.google.com/go/pubsub v1.50.0
+	cloud.google.com/go/secretmanager v1.15.0
 	cloud.google.com/go/storage v1.56.0
+	github.com/eclipse/paho.mqtt.golang v1.5.0
 	github.com/google/uuid v1.6.0
-	github.com/illmade-knight/go-cloud-manager v0.0.25-beta
-	github.com/illmade-knight/go-dataflow v0.0.8-beta
-	github.com/illmade-knight/go-iot-dataflows v0.0.18-beta
+	github.com/illmade-knight/go-cloud-manager v0.0.28-beta
+	github.com/illmade-knight/go-dataflow v0.1.9-beta
+	github.com/illmade-knight/go-dataflow-services v0.1.12-beta
 	github.com/illmade-knight/go-test v0.0.2-beta
 	github.com/rs/zerolog v1.34.0
 	github.com/stretchr/testify v1.10.0
-	google.golang.org/api v0.243.0
+	golang.org/x/term v0.33.0
+	google.golang.org/api v0.244.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -29,8 +32,8 @@ require (
 	cloud.google.com/go/iam v1.5.2 // indirect
 	cloud.google.com/go/longrunning v0.6.7 // indirect
 	cloud.google.com/go/monitoring v1.24.2 // indirect
+	cloud.google.com/go/pubsub/v2 v2.0.0 // indirect
 	cloud.google.com/go/resourcemanager v1.10.6 // indirect
-	cloud.google.com/go/secretmanager v1.15.0 // indirect
 	dario.cat/mergo v1.0.1 // indirect
 	github.com/Azure/go-ansiterm v0.0.0-20210617225240-d185dfc1b5a1 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.27.0 // indirect
@@ -53,7 +56,6 @@ require (
 	github.com/docker/go-connections v0.5.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/ebitengine/purego v0.8.4 // indirect
-	github.com/eclipse/paho.mqtt.golang v1.5.0 // indirect
 	github.com/envoyproxy/go-control-plane/envoy v1.32.4 // indirect
 	github.com/envoyproxy/protoc-gen-validate v1.2.1 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
@@ -122,7 +124,7 @@ require (
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
 	google.golang.org/genproto v0.0.0-20250603155806-513f23925822 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20250721164621-a45f3dfb1074 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20250721164621-a45f3dfb1074 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20250728155136-f173205681a0 // indirect
 	google.golang.org/grpc v1.74.2 // indirect
 	google.golang.org/protobuf v1.36.6 // indirect
 )

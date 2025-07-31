@@ -1,22 +1,68 @@
-## Hard to get testing right
 
-gemini was having real problems with these tests - prompting it was hard
 
-we came up with a prompt that it seemed to understand:
+### Verifying dataflow with e2e test
 
-### Prompt
+We have a dataflow that chains services.
 
-OK sorry I realize there has been an error in the logical sequence that crept into the code earlier than I had thought. 
+we'll show the end to end tests - these are in the repo github.com/illmade-knight/go-cloud-deployments
 
-Lets just create a new small file to try out the sequence I want 
-and lets talk through how it will work. Can we work on a simple file for our ideas. 
+these use services defined in github.com/illmade-knight/go-dataflow-services
 
-We want a verification function that we can set up early on with a pubsub subscription listening for messages. 
-This function does not know how many messages it will receive yet. 
-Then we run loadgen - 
-we wait for loadgen to finish and then we should know how many messages it really sent - 
-now we want to signal to the verifier the loadgen has finished AND how many messages were really sent - 
+and these service rely on a pkg library in github.com/illmade-knight/go-dataflow
 
-This might seem over complicated but in bigger dataflows we want to be able to look for any possible area where problems come from. 
-Can you take a look at this - and before creating this mini test give me your opinion on the sequence of startup, 
-the signalling invovled and how we will implement it?
+Give an evaluation of the files as I present them
+
+We'll start with github.com/illmade-knight/go-dataflow
+
+We want to ensure we never double wrap messages in the pipeline
+
+What do I mean by double wrapping? We have a base message type and MessageData holds Payload - 
+we want to ensure this Payload field never contains a raw []byte MessageData
+
+````
+type Message struct {
+	// MessageData contains the core payload and user-defined enrichment data.
+	MessageData
+
+	// Attributes holds metadata from the message broker (e.g., Pub/Sub attributes, MQTT topic).
+	Attributes map[string]string
+
+	// Ack is a function to call to signal that processing was successful and the
+	// message can be permanently removed from the source.
+	Ack func()
+
+	// Nack is a function to call to signal that processing has failed and the
+	// message should be re-queued or sent to a dead-letter queue.
+	Nack func()
+}
+
+// MessageData holds the essential payload of a message. This struct is often
+// serialized and used as the data for messages being published to a downstream system.
+type MessageData struct {
+	// ID is the unique identifier for the message from the source broker.
+	ID string `json:"id"`
+
+	// Payload is the raw byte content of the message.
+	Payload []byte `json:"payload"`
+
+	// PublishTime is the timestamp when the message was originally published.
+	PublishTime time.Time `json:"publishTime"`
+
+	// EnrichmentData is a generic map to hold any kind of data added by
+	// pipeline transformers. This data is serialized along with the rest of
+	// the MessageData when published.
+	EnrichmentData map[string]interface{} `json:"enrichmentData,omitempty"`
+}
+````
+
+can you alert as soon as you see an instance of double wrapping
+
+while we go through the files can you ensure we remove any development comments and instead get the files
+ready for publishing to github with useful comments and usage information.
+
+look out for any inconsistencies in func calls or structs - we're looking to make the definition and usage as uniform as possible
+
+as we run through this refactor can you keep a list of refactored files and keep track of any files that will be affected by the refactor
+show this list at the end of each response.
+
+I'll start with the messagepipeline pkg

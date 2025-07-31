@@ -57,6 +57,6 @@ func main() {
 	<-quit
 	log.Info().Msg("Shutdown signal received, stopping Director...")
 
-	director.Shutdown()
+	director.Shutdown(ctx)
 	log.Info().Msg("Director stopped.")
 }

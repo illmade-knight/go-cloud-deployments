@@ -1,11 +1,15 @@
 //go:build integration
 
+// Package e2e contains end-to-end tests for dataflow pipelines.
+// This file provides generic, reusable helper functions for verifying test outcomes
+// in various Google Cloud services.
 package e2e
 
 import (
 	"bufio"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -20,13 +24,15 @@ import (
 	"google.golang.org/api/iterator"
 )
 
-// MessageValidationFunc defines a function for custom validation logic.
+// MessageValidationFunc defines a function for custom validation logic on a Pub/Sub message.
 // It is injected into the generic verifier to check message contents.
 // It should return 'true' if the message is valid and should be counted.
 type MessageValidationFunc func(t *testing.T, msg *pubsub.Message) bool
 
-// verifyPubSubMessages is a generic, reusable verifier. It handles the core logic
-// of receiving messages and checking counts, while delegating custom validation.
+// verifyPubSubMessages is a generic, reusable verifier for Pub/Sub topics.
+// It listens on a subscription until an expected number of messages (sent via a channel)
+// has been received. It can use an optional validation function to filter which
+// messages count toward the total.
 func verifyPubSubMessages(
 	t *testing.T,
 	logger zerolog.Logger,
@@ -76,18 +82,14 @@ func verifyPubSubMessages(
 
 	// Start receiving messages
 	err := sub.Receive(receiveCtx, func(receiveCallbackCtx context.Context, msg *pubsub.Message) {
-		// Always acknowledge the message to prevent redelivery.
 		msg.Ack()
 
-		// If a custom validator is provided, use it to filter messages.
-		// If the message is not valid, we stop processing it here.
 		if validator != nil {
 			if !validator(t, msg) {
 				return
 			}
 		}
 
-		// Only increment the count for messages that passed validation (or if no validator was provided).
 		newCount := receivedCount.Add(1)
 
 		mu.Lock()
@@ -95,20 +97,16 @@ func verifyPubSubMessages(
 			milestoneTimings["First Valid Message"] = time.Since(receiverStartTime)
 		}
 
-		// Check if the number of *valid* messages has reached the target.
 		if targetCount.Load() >= 0 && newCount >= targetCount.Load() {
 			if _, ok := milestoneTimings["Final Valid Message"]; !ok {
 				milestoneTimings["Final Valid Message"] = time.Since(receiverStartTime)
 			}
-			// Cancel the receive context to stop the loop.
 			cancel()
-			verifierLogger.Info().Int32("received", newCount).Int32("target", targetCount.Load()).Msg("Target count reached. Signalling receive completion.")
 		}
 		mu.Unlock()
 	})
 
-	// A Canceled error is expected upon graceful shutdown, so we ignore it.
-	if err != nil && err != context.Canceled {
+	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Errorf("Pub/Sub Receive returned an unexpected error: %v", err)
 	}
 
@@ -123,7 +121,6 @@ func verifyPubSubMessages(
 	mu.Unlock()
 	t.Log("------------------------------------")
 
-	// Assert that the final count of valid messages matches the expected count.
 	if targetCount.Load() >= 0 {
 		require.Equal(t, int(targetCount.Load()), finalCount, "Did not receive the exact number of expected (and valid) messages.")
 	} else {
@@ -182,7 +179,8 @@ func verifyBigQueryRows(
 	verifierLogger.Info().Msg("BigQuery validation successful!")
 }
 
-// CORRECTED: verifyGCSResults now polls for an exact number of records and uses structured logging.
+// verifyGCSResults polls GCS and counts the total number of records across all
+// JSONL files in a bucket until an exact expected count is reached.
 func verifyGCSResults(t *testing.T, logger zerolog.Logger, ctx context.Context, gcsClient *storage.Client, bucketName string, expectedCount int) {
 	t.Helper()
 	verifierLogger := logger.With().Str("component", "GCSVerifier").Str("bucket", bucketName).Logger()
@@ -194,11 +192,10 @@ func verifyGCSResults(t *testing.T, logger zerolog.Logger, ctx context.Context, 
 		it := bucket.Objects(ctx, nil)
 		for {
 			attrs, err := it.Next()
-			if err == iterator.Done {
+			if errors.Is(err, iterator.Done) {
 				break
 			}
 			if err != nil {
-				// In a test environment, transient errors can occur. Log and continue polling.
 				verifierLogger.Warn().Err(err).Msg("Failed to list GCS objects during polling")
 				return false
 			}
@@ -208,20 +205,19 @@ func verifyGCSResults(t *testing.T, logger zerolog.Logger, ctx context.Context, 
 				verifierLogger.Warn().Err(err).Str("object", attrs.Name).Msg("Failed to create GCS object reader")
 				continue
 			}
+			defer rc.Close()
 
 			gzr, err := gzip.NewReader(rc)
 			if err != nil {
-				rc.Close()
 				verifierLogger.Warn().Err(err).Str("object", attrs.Name).Msg("Failed to create gzip reader")
 				continue
 			}
+			defer gzr.Close()
 
 			scanner := bufio.NewScanner(gzr)
 			for scanner.Scan() {
 				totalCount++
 			}
-			gzr.Close()
-			rc.Close()
 		}
 
 		verifierLogger.Info().Int("current_count", totalCount).Int("expected_exact", expectedCount).Msg("Polling GCS results...")
@@ -229,6 +225,5 @@ func verifyGCSResults(t *testing.T, logger zerolog.Logger, ctx context.Context, 
 
 	}, 90*time.Second, 5*time.Second, "GCS object count did not meet threshold in time")
 
-	// Final assertion for the exact count.
 	require.Equal(t, expectedCount, totalCount, "Did not find the exact number of expected records in GCS")
 }

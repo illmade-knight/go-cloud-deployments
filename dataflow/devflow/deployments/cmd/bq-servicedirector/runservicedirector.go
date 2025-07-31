@@ -30,7 +30,7 @@ type EnrichedTestPayload struct {
 }
 
 const (
-	EnrichedTestPayloadSchema = "github.com/illmade-knight/go-iot-dataflows/dataflow/devflow/EnrichedTestPayload"
+	EnrichedTestPayloadSchema = "github.com/illmade-knight/go-dataflow-service/dataflow/devflow/EnrichedTestPayload"
 )
 
 func main() {
@@ -74,6 +74,6 @@ func main() {
 	<-quit
 	logger.Info().Msg("Shutdown signal received, stopping Director...")
 
-	director.Shutdown()
+	director.Shutdown(ctx)
 	logger.Info().Msg("Director stopped.")
 }

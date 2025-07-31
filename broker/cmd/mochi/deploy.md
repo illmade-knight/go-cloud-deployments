@@ -70,3 +70,6 @@ APP_MQTT_USERNAME: "sreceiver"
           schema_source_identifier: "github.com/your-repo/path/to.YourPayloadStruct"
           # Example of adding clustering for performance.
           clustering_fields: ["device_id"]
+
+
+gcloud run deploy mochi --source . --port 1883 --ingress=all  --region=us-central1   --set-env-vars="CLIENT_USER=lclient, SERVICE_USER=sreceiver"  

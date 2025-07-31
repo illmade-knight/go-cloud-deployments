@@ -1,59 +1,93 @@
-// cmd/ingestion/main.go
 package main
 
 import (
 	"context"
 	"os"
 	"os/signal"
+	"regexp"
 	"syscall"
+	"time"
 
-	"github.com/illmade-knight/go-iot-dataflows/pkg/ingestion" // Import the application builder
-
+	"github.com/illmade-knight/go-dataflow-services/pkg/ingestion"
+	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
 	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
-func main() {
-	// Use a console writer for pretty, human-readable logs.
-	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
+// deviceFinder is a regex to extract a device ID from a standard MQTT topic structure.
+var deviceFinder = regexp.MustCompile(`^[^/]+/([^/]+)/[^/]+$`)
 
+// ingestionEnricher is a message enricher that adds basic metadata from the MQTT topic.
+// This is the core "transformation" logic for the ingestion service.
+func ingestionEnricher(_ context.Context, msg *messagepipeline.Message) (bool, error) {
+	topic, ok := msg.Attributes["mqtt_topic"]
+	if !ok {
+		return false, nil // No topic, nothing to do.
+	}
+
+	var deviceID string
+	if matches := deviceFinder.FindStringSubmatch(topic); len(matches) > 1 {
+		deviceID = matches[1]
+	}
+
+	if msg.EnrichmentData == nil {
+		msg.EnrichmentData = make(map[string]interface{})
+	}
+	msg.EnrichmentData["DeviceID"] = deviceID
+	msg.EnrichmentData["Topic"] = topic
+	msg.EnrichmentData["Timestamp"] = msg.PublishTime
+
+	return false, nil // Do not skip, no error.
+}
+
+func main() {
+	logger := log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
+	zerolog.SetGlobalLevel(zerolog.InfoLevel)
 	ctx := context.Background()
 
-	// Load the configuration for the ingestion service.
-	cfg, err := ingestion.LoadConfig()
-	if err != nil {
-		logger.Fatal().Err(err).Msg("Failed to load ingestion service config")
+	projectID := os.Getenv("GOOGLE_CLOUD_PROJECT")
+	if projectID == "" {
+		logger.Fatal().Msg("GOOGLE_CLOUD_PROJECT environment variable must be set")
 	}
+
+	cfg := ingestion.LoadConfigDefaults(projectID)
+	// Override defaults with environment variables
+	if port := os.Getenv("PORT"); port != "" {
+		cfg.HTTPPort = ":" + port
+	}
+	if topic := os.Getenv("OUTPUT_TOPIC_ID"); topic != "" {
+		cfg.OutputTopicID = topic
+	}
+	// MQTT config is loaded from env by default in LoadConfigDefaults
 
 	logger.Info().
 		Str("project_id", cfg.ProjectID).
-		Str("service_name", cfg.ServiceName).
-		Str("producer_topic_id", cfg.Producer.TopicID).
+		Str("output_topic", cfg.OutputTopicID).
 		Str("mqtt_broker", cfg.MQTT.BrokerURL).
-		Msg("Configuration loaded")
+		Msg("Preparing to start Ingestion service")
 
-	// Create the IngestionService instance using the refactored wrapper.
-	// The wrapper now internally handles message transformation, so we no longer
-	// create or inject an 'extractor' here.
-	ingestionService, err := ingestion.NewIngestionServiceWrapper(ctx, cfg, logger)
+	ingestionService, err := ingestion.NewIngestionServiceWrapper(ctx, cfg, logger, ingestionEnricher)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Failed to create IngestionService")
 	}
 
-	logger.Info().Msg("Ingestion service created successfully.")
-
-	// Start the service (non-blocking).
-	if err := ingestionService.Start(); err != nil {
-		logger.Fatal().Err(err).Msg("Failed to start IngestionService")
-	}
+	go func() {
+		if err := ingestionService.Start(ctx); err != nil {
+			logger.Fatal().Err(err).Msg("Failed to start IngestionService")
+		}
+	}()
 	logger.Info().Str("port", ingestionService.GetHTTPPort()).Msg("IngestionService is running")
 
-	// Wait for a shutdown signal.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	logger.Info().Msg("Shutdown signal received, stopping IngestionService...")
 
-	// Gracefully shut down the service.
-	ingestionService.Shutdown()
-	logger.Info().Msg("IngestionService stopped.")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := ingestionService.Shutdown(shutdownCtx); err != nil {
+		logger.Error().Err(err).Msg("IngestionService shutdown failed")
+	} else {
+		logger.Info().Msg("IngestionService stopped.")
+	}
 }

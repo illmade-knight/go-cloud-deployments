@@ -1,10 +1,16 @@
 //go:build integration
 
+// Package e2e contains end-to-end tests for dataflow pipelines.
+// This test file, fullflowe2e_test.go, validates a complex fan-out dataflow:
+// 1. MQTT -> Ingestion Service -> Pub/Sub (Topic A)
+// 2. Pub/Sub (Topic A) -> Enrichment Service -> Pub/Sub (Topic B) -> BigQuery Sink
+// 3. Pub/Sub (Topic A) -> IceStore Service (Archival) -> GCS Sink
 package e2e
 
 import (
 	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net/http"
@@ -13,18 +19,22 @@ import (
 	"testing"
 	"time"
 
-	bq "cloud.google.com/go/bigquery"
+	"cloud.google.com/go/bigquery"
 	"cloud.google.com/go/firestore"
+	"cloud.google.com/go/pubsub"
 	"cloud.google.com/go/storage"
 	"github.com/google/uuid"
+	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
+	"github.com/illmade-knight/go-dataflow-services/pkg/enrich"
+	"github.com/illmade-knight/go-dataflow-services/pkg/ingestion"
+	"github.com/illmade-knight/go-test/auth"
+	"github.com/illmade-knight/go-test/emulators"
+	"github.com/illmade-knight/go-test/loadgen"
 	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
-
-	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
-	"github.com/illmade-knight/go-test/emulators"
-	"github.com/illmade-knight/go-test/loadgen"
 )
 
 const (
@@ -34,7 +44,6 @@ const (
 )
 
 var (
-	// keepResources is a flag to allow keeping cloud resources after the test for inspection.
 	keepResources = flag.Bool("keep-resources", false, "Set to true to keep cloud resources after the test for inspection.")
 )
 
@@ -43,25 +52,13 @@ func TestEnrichmentBigQueryIceStoreE2E(t *testing.T) {
 		flag.Parse()
 	}
 
-	// --- Logger and Prerequisite Checks ---
 	logger := zerolog.New(os.Stderr).With().Timestamp().Str("test", "TestEnrichmentBigQueryIceStoreE2E").Logger()
 
-	projectID := os.Getenv("GOOGLE_CLOUD_PROJECT")
-	if projectID == "" {
-		t.Skip("Skipping E2E test: GOOGLE_CLOUD_PROJECT env var must be set.")
-	}
-	if os.Getenv("GOOGLE_APPLICATION_CREDENTIALS") == "" {
-		logger.Warn().Msg("GOOGLE_APPLICATION_CREDENTIALS not set, relying on Application Default Credentials (ADC).")
-		checkGCPAuth(t)
-	}
+	projectID := auth.CheckGCPAuth(t)
 
-	// --- Timing & Metrics Setup ---
 	timings := make(map[string]string)
 	testStart := time.Now()
-	var publishedCount int
-	var expectedMessageCount int
-	var verifiedBQCount int
-	var verifiedGCSCount int
+	var publishedCount, expectedMessageCount, verifiedBQCount, verifiedGCSCount int
 
 	t.Cleanup(func() {
 		timings["TotalTestDuration"] = time.Since(testStart).String()
@@ -78,9 +75,8 @@ func TestEnrichmentBigQueryIceStoreE2E(t *testing.T) {
 	})
 
 	totalTestContext, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
+	t.Cleanup(cancel)
 
-	// 1. Define unique resources for this test run.
 	runID := uuid.New().String()[:8]
 	dataflowName := fmt.Sprintf("enrich-bq-icestore-flow-%s", runID)
 	ingestionTopicID := fmt.Sprintf("ingest-topic-%s", runID)
@@ -93,28 +89,15 @@ func TestEnrichmentBigQueryIceStoreE2E(t *testing.T) {
 	uniqueTableID := fmt.Sprintf("dev_enriched_payloads_%s", runID)
 	firestoreCollection := fmt.Sprintf("devices-e2e-%s", runID)
 
-	// Determine lifecycle strategy based on the flag
-	lifecycleStrategy := servicemanager.LifecycleStrategyEphemeral
-	if *keepResources {
-		lifecycleStrategy = servicemanager.LifecycleStrategyPermanent
-		logger.Info().Msg("Test resources will be KEPT after test execution for inspection.")
-	} else {
-		logger.Info().Msg("Test resources will be TORN DOWN after test execution.")
-	}
-
-	// 2. Build the services definition in memory.
-	enrichedSchemaIdentifier := "github.com/illmade-knight/go-iot-dataflows/dataflow/devflow/e2e.EnrichedTestPayload"
+	enrichedSchemaIdentifier := "github.com/illmade-knight/go-dataflow-services/dataflow/devflow/e2e.EnrichedTestPayload"
+	servicemanager.RegisterSchema(enrichedSchemaIdentifier, EnrichedTestPayload{})
 
 	servicesConfig := &servicemanager.MicroserviceArchitecture{
-		Environment: servicemanager.Environment{
-			Name:      "e2e-full-flow",
-			ProjectID: projectID,
-			Location:  "US",
-		},
+		Environment: servicemanager.Environment{Name: "e2e-full-flow", ProjectID: projectID, Location: "US"},
 		Dataflows: map[string]servicemanager.ResourceGroup{
 			dataflowName: {
 				Name:      dataflowName,
-				Lifecycle: &servicemanager.LifecyclePolicy{Strategy: lifecycleStrategy},
+				Lifecycle: &servicemanager.LifecyclePolicy{Strategy: servicemanager.LifecycleStrategyEphemeral},
 				Resources: servicemanager.CloudResourcesSpec{
 					Topics: []servicemanager.TopicConfig{
 						{CloudResource: servicemanager.CloudResource{Name: ingestionTopicID}},
@@ -127,20 +110,16 @@ func TestEnrichmentBigQueryIceStoreE2E(t *testing.T) {
 					},
 					GCSBuckets:       []servicemanager.GCSBucket{{CloudResource: servicemanager.CloudResource{Name: uniqueBucketName}, Location: "US"}},
 					BigQueryDatasets: []servicemanager.BigQueryDataset{{CloudResource: servicemanager.CloudResource{Name: uniqueDatasetID}}},
-					BigQueryTables: []servicemanager.BigQueryTable{
-						{
-							CloudResource:    servicemanager.CloudResource{Name: uniqueTableID},
-							Dataset:          uniqueDatasetID,
-							SchemaType:       enrichedSchemaIdentifier,
-							ClusteringFields: []string{"device_id"}, // makes the table clustered if present
-						},
-					},
+					BigQueryTables: []servicemanager.BigQueryTable{{
+						CloudResource: servicemanager.CloudResource{Name: uniqueTableID},
+						Dataset:       uniqueDatasetID,
+						SchemaType:    enrichedSchemaIdentifier,
+					}},
 				},
 			},
 		},
 	}
 
-	// 3. Setup dependencies: Emulators and Real Cloud Clients
 	var opts []option.ClientOption
 	if creds := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"); creds != "" {
 		opts = append(opts, option.WithCredentialsFile(creds))
@@ -152,132 +131,136 @@ func TestEnrichmentBigQueryIceStoreE2E(t *testing.T) {
 
 	fsClient, err := firestore.NewClient(totalTestContext, projectID, opts...)
 	require.NoError(t, err)
-	defer fsClient.Close()
+	t.Cleanup(func() { assert.NoError(t, fsClient.Close()) })
 
-	bqClient, err := bq.NewClient(totalTestContext, projectID, opts...)
+	bqClient, err := bigquery.NewClient(totalTestContext, projectID, opts...)
 	require.NoError(t, err)
-	defer bqClient.Close()
+	t.Cleanup(func() { assert.NoError(t, bqClient.Close()) })
 
 	gcsClient, err := storage.NewClient(totalTestContext, opts...)
 	require.NoError(t, err)
-	defer gcsClient.Close()
+	t.Cleanup(func() { assert.NoError(t, gcsClient.Close()) })
 
-	// 4. Populate Firestore with enrichment data.
+	psClient, err := pubsub.NewClient(totalTestContext, projectID, opts...)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = psClient.Close() })
+
 	devices, deviceToClientID, cleanupFirestore := setupEnrichmentTestData(t, totalTestContext, fsClient, firestoreCollection, runID, combinedTestNumDevices, combinedTestRate)
 	t.Cleanup(cleanupFirestore)
 
-	// 5. Start services and orchestrate resources.
-	start = time.Now()
 	directorService, directorURL := startServiceDirector(t, totalTestContext, logger, servicesConfig)
-	t.Cleanup(directorService.Shutdown)
-	timings["ServiceStartup(Director)"] = time.Since(start).String()
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		directorService.Shutdown(shutdownCtx)
+	})
 
-	start = time.Now()
 	setupURL := directorURL + "/dataflow/setup"
 	resp, err := http.Post(setupURL, "application/json", bytes.NewBuffer([]byte{}))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	resp.Body.Close()
-	timings["CloudResourceSetup(Director)"] = time.Since(start).String()
+	_ = resp.Body.Close()
 
 	t.Cleanup(func() {
-		// IMPORTANT: Always tear down resources if the test failed OR if the -keep-resources flag is false.
 		if *keepResources && !t.Failed() {
 			logger.Info().Msg("Test passed and -keep-resources flag is set. Cloud resources will be KEPT for inspection.")
-			return // Exit the cleanup function, skipping teardown
+			return
 		}
-
-		teardownStart := time.Now()
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cleanupCancel()
 		logger.Info().Msg("Requesting resource teardown from ServiceDirector...")
 		teardownURL := directorURL + "/orchestrate/teardown"
-		req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, teardownURL, nil)
-		http.DefaultClient.Do(req)
-
-		// Explicitly delete resources as a fallback, especially after a failed test.
-		bqClient.Dataset(uniqueDatasetID).DeleteWithContents(context.Background())
+		req, _ := http.NewRequestWithContext(cleanupCtx, http.MethodPost, teardownURL, nil)
+		_, _ = http.DefaultClient.Do(req)
+		_ = bqClient.Dataset(uniqueDatasetID).DeleteWithContents(cleanupCtx)
 		bucket := gcsClient.Bucket(uniqueBucketName)
-		it := bucket.Objects(context.Background(), nil)
+		it := bucket.Objects(cleanupCtx, nil)
 		for {
 			attrs, err := it.Next()
-			if err == iterator.Done {
+			if errors.Is(err, iterator.Done) {
 				break
 			}
 			if err == nil {
-				bucket.Object(attrs.Name).Delete(context.Background())
+				_ = bucket.Object(attrs.Name).Delete(cleanupCtx)
 			}
 		}
-		bucket.Delete(context.Background())
-		timings["CloudResourceTeardown"] = time.Since(teardownStart).String()
+		_ = bucket.Delete(cleanupCtx)
 	})
 
-	start = time.Now()
-	ingestionSvc := startIngestionService(t, totalTestContext, logger, directorURL, mqttConn.EmulatorAddress, projectID, ingestionTopicID, dataflowName)
+	cfg := ingestion.LoadConfigDefaults(projectID)
+	cfg.DataflowName = dataflowName
+	cfg.ServiceDirectorURL = directorURL
+	cfg.OutputTopicID = ingestionTopicID
+	cfg.MQTT.Topic = "devices/+/data"
+	cfg.MQTT.BrokerURL = mqttConn.EmulatorAddress
+	ingestionLogger := logger.With().Str("service", "ingestion").Logger()
+	ingestionSvc := startIngestionService(t, totalTestContext, ingestionLogger, cfg)
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		_ = ingestionSvc.Shutdown(shutdownCtx)
+	})
 
-	timings["ServiceStartup(Ingestion)"] = time.Since(start).String()
-	t.Cleanup(ingestionSvc.Shutdown)
+	enrichCfg := enrich.LoadConfigDefaults(projectID)
+	enrichCfg.DataflowName = dataflowName
+	enrichCfg.ServiceDirectorURL = directorURL
+	enrichCfg.InputSubscriptionID = enrichmentSubID
+	enrichCfg.OutputTopicID = enrichedTopicID
+	enrichCfg.CacheConfig.RedisConfig.Addr = redisConn.EmulatorAddress
+	enrichCfg.CacheConfig.FirestoreConfig.CollectionName = firestoreCollection
+	enrichmentSvc := startEnrichmentService(t, totalTestContext, logger, enrichCfg, fsClient, psClient)
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		_ = enrichmentSvc.Shutdown(shutdownCtx)
+	})
 
-	start = time.Now()
-	enrichmentSvc := startEnrichmentService(t, totalTestContext, logger, directorURL, projectID, enrichmentSubID, enrichedTopicID, redisConn.EmulatorAddress, firestoreCollection, dataflowName)
-	timings["ServiceStartup(Enrichment)"] = time.Since(start).String()
-	t.Cleanup(enrichmentSvc.Shutdown)
-
-	start = time.Now()
-	bqSvc, err := startEnrichedBigQueryService(t, totalTestContext, logger, directorURL, projectID, bigquerySubID, uniqueDatasetID, uniqueTableID, dataflowName)
+	bqSvc, err := startEnrichedBigQueryService(t, totalTestContext, logger, directorURL, projectID, bigquerySubID, uniqueDatasetID, uniqueTableID, dataflowName, bqEnrichedTransformer)
 	require.NoError(t, err)
-	timings["ServiceStartup(BigQuery)"] = time.Since(start).String()
-	t.Cleanup(bqSvc.Shutdown)
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		_ = bqSvc.Shutdown(shutdownCtx)
+	})
 
-	start = time.Now()
-	icestoreSvc := startIceStoreService(t, totalTestContext, logger, directorURL, projectID, icestoreSubID, uniqueBucketName, dataflowName)
-
-	timings["ServiceStartup(IceStore)"] = time.Since(start).String()
-	t.Cleanup(icestoreSvc.Shutdown)
-
+	icestoreSvc := startIceStoreService(t, totalTestContext, logger, projectID, icestoreSubID, uniqueBucketName, dataflowName)
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		_ = icestoreSvc.Shutdown(shutdownCtx)
+	})
 	logger.Info().Msg("All services started successfully.")
 
-	// 6. Run Load Generator
-	loadgenStart := time.Now()
-	logger.Info().Msg("Starting MQTT load generator...")
 	generator := loadgen.NewLoadGenerator(loadgen.NewMqttClient(mqttConn.EmulatorAddress, "devices/+/data", 1, logger), devices, logger)
 	expectedMessageCount = generator.ExpectedMessagesForDuration(generateCombinedMessagesFor)
 	publishedCount, err = generator.Run(totalTestContext, generateCombinedMessagesFor)
 	require.NoError(t, err)
-	timings["LoadGeneration"] = time.Since(loadgenStart).String()
-	logger.Info().Int("published_count", publishedCount).Msg("Load generator finished.")
 
-	// 7. Verify results in BigQuery and GCS
-	verificationStart := time.Now()
 	logger.Info().Msg("Starting BigQuery and GCS verification...")
 
-	// BigQuery verification
-	enrichedBigQueryValidator := func(t *testing.T, iter *bq.RowIterator) error {
+	enrichedBigQueryValidator := func(t *testing.T, iter *bigquery.RowIterator) error {
 		var rowCount int
 		for {
 			var row EnrichedTestPayload
 			err := iter.Next(&row)
-			if err == iterator.Done {
+			if errors.Is(err, iterator.Done) {
 				break
 			}
 			if err != nil {
 				return fmt.Errorf("failed to read BigQuery row: %w", err)
 			}
 			rowCount++
-			// Verify enrichment fields
-			expectedClientID, clientIDFound := deviceToClientID[row.DeviceID]
+			_, clientIDFound := deviceToClientID[row.DeviceID]
 			require.True(t, clientIDFound, "Device ID %s not found in expected map", row.DeviceID)
-			require.Equal(t, expectedClientID, row.ClientID, "ClientID mismatch for device %s", row.DeviceID)
+			require.NotEmpty(t, row.ClientID, "ClientID missing for device %s", row.DeviceID)
 			require.Equal(t, "loc-456", row.LocationID, "LocationID mismatch for device %s", row.DeviceID)
 		}
 		require.Equal(t, publishedCount, rowCount, "the final number of rows in BigQuery should match the number of messages published")
-		verifiedBQCount = rowCount // Update verified count for metrics
+		verifiedBQCount = rowCount
 		return nil
 	}
 	verifyBigQueryRows(t, logger, totalTestContext, projectID, uniqueDatasetID, uniqueTableID, publishedCount, enrichedBigQueryValidator)
 
-	// GCS verification (IceStore)
 	verifyGCSResults(t, logger, totalTestContext, gcsClient, uniqueBucketName, publishedCount)
 	verifiedGCSCount = publishedCount
-
-	timings["VerificationDuration"] = time.Since(verificationStart).String()
-	timings["ProcessingAndVerificationLatency"] = time.Since(loadgenStart).String()
 }

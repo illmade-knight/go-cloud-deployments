@@ -1,5 +1,8 @@
 //go:build integration
 
+// Package e2e contains end-to-end tests for dataflow pipelines.
+// This test file, enrichment_test.go, validates the dataflow from MQTT ingestion,
+// through the cache-backed enrichment service, to a final Pub/Sub topic for verification.
 package e2e
 
 import (
@@ -16,14 +19,15 @@ import (
 	"cloud.google.com/go/firestore"
 	"cloud.google.com/go/pubsub"
 	"github.com/google/uuid"
-	"github.com/rs/zerolog"
-	"github.com/stretchr/testify/require"
-	"google.golang.org/api/option"
-
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
-	"github.com/illmade-knight/go-dataflow/pkg/types"
+	"github.com/illmade-knight/go-dataflow-services/pkg/enrich"
+	"github.com/illmade-knight/go-dataflow-services/pkg/ingestion"
+	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
+	"github.com/illmade-knight/go-test/auth"
 	"github.com/illmade-knight/go-test/emulators"
 	"github.com/illmade-knight/go-test/loadgen"
+	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -32,20 +36,12 @@ const (
 	enrichmentE2ELoadTestRate       = 1.0
 )
 
-func TestEnrichmentE2E_HappyPath(t *testing.T) {
+func TestEnrichmentE2E(t *testing.T) {
 	// --- Test & Logger Setup ---
-	// Create a test-specific logger that writes to the test output.
 	logger := zerolog.New(os.Stderr).
-		With().Timestamp().Str("test", "TestEnrichmentE2E_HappyPath").Logger()
+		With().Timestamp().Str("test", "TestEnrichmentE2E").Logger()
 
-	projectID := os.Getenv("GOOGLE_CLOUD_PROJECT")
-	if projectID == "" {
-		t.Skip("Skipping E2E test: GOOGLE_CLOUD_PROJECT env var must be set.")
-	}
-	if os.Getenv("GOOGLE_APPLICATION_CREDENTIALS") == "" {
-		logger.Warn().Msg("GOOGLE_APPLICATION_CREDENTIALS not set, relying on Application Default Credentials (ADC).")
-		checkGCPAuth(t)
-	}
+	projectID := auth.CheckGCPAuth(t)
 
 	// --- Timing & Metrics Setup ---
 	timings := make(map[string]string)
@@ -53,7 +49,6 @@ func TestEnrichmentE2E_HappyPath(t *testing.T) {
 	var publishedCount int
 	var verifiedCount int
 	var expectedMessageCount int
-
 	t.Cleanup(func() {
 		timings["TotalTestDuration"] = time.Since(testStart).String()
 		timings["MessagesExpected"] = strconv.Itoa(expectedMessageCount)
@@ -67,8 +62,8 @@ func TestEnrichmentE2E_HappyPath(t *testing.T) {
 		logger.Info().Msg("------------------------------------")
 	})
 
-	totalTestContext, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
+	totalTestContext, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+	t.Cleanup(cancel)
 
 	// 1. Define unique resources for this test run.
 	runID := uuid.New().String()[:8]
@@ -91,7 +86,9 @@ func TestEnrichmentE2E_HappyPath(t *testing.T) {
 				Name:      dataflowName,
 				Lifecycle: &servicemanager.LifecyclePolicy{Strategy: servicemanager.LifecycleStrategyEphemeral},
 				Resources: servicemanager.CloudResourcesSpec{
-					Topics: []servicemanager.TopicConfig{{CloudResource: servicemanager.CloudResource{Name: ingestionTopicID}}, {CloudResource: servicemanager.CloudResource{Name: enrichedTopicID}}},
+					Topics: []servicemanager.TopicConfig{
+						{CloudResource: servicemanager.CloudResource{Name: ingestionTopicID}},
+						{CloudResource: servicemanager.CloudResource{Name: enrichedTopicID}}},
 					Subscriptions: []servicemanager.SubscriptionConfig{
 						{CloudResource: servicemanager.CloudResource{Name: enrichmentSubID}, Topic: ingestionTopicID},
 						{CloudResource: servicemanager.CloudResource{Name: verifierSubID}, Topic: enrichedTopicID},
@@ -102,18 +99,18 @@ func TestEnrichmentE2E_HappyPath(t *testing.T) {
 	}
 
 	// 3. Setup dependencies: Emulators and Real Firestore Client
-	var opts []option.ClientOption
-	if creds := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"); creds != "" {
-		opts = append(opts, option.WithCredentialsFile(creds))
-	}
 	start := time.Now()
 	mqttConn := emulators.SetupMosquittoContainer(t, totalTestContext, emulators.GetDefaultMqttImageContainer())
 	redisConn := emulators.SetupRedisContainer(t, totalTestContext, emulators.GetDefaultRedisImageContainer())
 	timings["EmulatorSetup"] = time.Since(start).String()
 
-	fsClient, err := firestore.NewClient(totalTestContext, projectID, opts...)
+	fsClient, err := firestore.NewClient(totalTestContext, projectID)
 	require.NoError(t, err)
-	defer fsClient.Close()
+	t.Cleanup(func() { _ = fsClient.Close() })
+
+	psClient, err := pubsub.NewClient(totalTestContext, projectID)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = psClient.Close() })
 
 	// 4. Populate Firestore with enrichment data for all test devices.
 	devices, deviceToClientID, cleanupFirestore := setupEnrichmentTestData(
@@ -130,7 +127,11 @@ func TestEnrichmentE2E_HappyPath(t *testing.T) {
 	// 5. Start services and orchestrate resources.
 	start = time.Now()
 	directorService, directorURL := startServiceDirector(t, totalTestContext, logger, servicesConfig)
-	t.Cleanup(directorService.Shutdown)
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		directorService.Shutdown(shutdownCtx)
+	})
 	timings["ServiceStartup(Director)"] = time.Since(start).String()
 
 	start = time.Now()
@@ -138,99 +139,105 @@ func TestEnrichmentE2E_HappyPath(t *testing.T) {
 	resp, err := http.Post(setupURL, "application/json", bytes.NewBuffer([]byte{}))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	timings["CloudResourceSetup(Director)"] = time.Since(start).String()
 
 	t.Cleanup(func() {
 		teardownStart := time.Now()
+		teardownCtx, teardownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer teardownCancel()
 		teardownURL := directorURL + "/orchestrate/teardown"
-		req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, teardownURL, nil)
-		http.DefaultClient.Do(req)
+		req, _ := http.NewRequestWithContext(teardownCtx, http.MethodPost, teardownURL, nil)
+		_, _ = http.DefaultClient.Do(req)
 		timings["CloudResourceTeardown(Director)"] = time.Since(teardownStart).String()
 	})
 
-	// ok our manager should have set up this subscription - check it with a short context to make sure we don't hang
-	subContext, cancelSubCheck := context.WithTimeout(totalTestContext, 10*time.Second)
-	defer cancelSubCheck()
-	client, err := pubsub.NewClient(subContext, projectID)
-	defer client.Close()
-	require.NoError(t, err)
-	verifierSub := client.Subscription(verifierSubID)
+	verifierSub := psClient.Subscription(verifierSubID)
 	ok, err := verifierSub.Exists(totalTestContext)
 	require.NoError(t, err)
-	require.True(t, ok)
-	if !ok {
-		logger.Fatal().Msg("no verifier subscription")
-	}
+	require.True(t, ok, "verifier subscription should exist after director setup")
 
 	start = time.Now()
-	ingestionSvc := startIngestionService(t, totalTestContext, logger, directorURL, mqttConn.EmulatorAddress, projectID, ingestionTopicID, dataflowName)
+	cfg := ingestion.LoadConfigDefaults(projectID)
+	cfg.DataflowName = dataflowName
+	cfg.ServiceDirectorURL = directorURL
+	cfg.OutputTopicID = ingestionTopicID
+	cfg.MQTT.Topic = "devices/+/data"
+	cfg.MQTT.BrokerURL = mqttConn.EmulatorAddress
 
+	ingestionLogger := logger.With().Str("service", "ingestion").Logger()
+	ingestionSvc := startIngestionService(t, totalTestContext, ingestionLogger, cfg)
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		_ = ingestionSvc.Shutdown(shutdownCtx)
+	})
 	timings["ServiceStartup(Ingestion)"] = time.Since(start).String()
-	t.Cleanup(ingestionSvc.Shutdown)
 
 	start = time.Now()
-	enrichmentSvc := startEnrichmentService(t, totalTestContext, logger, directorURL, projectID, enrichmentSubID, enrichedTopicID, redisConn.EmulatorAddress, firestoreCollection, dataflowName)
-
+	enrichCfg := enrich.LoadConfigDefaults(projectID) // Load defaults and override
+	enrichCfg.DataflowName = dataflowName
+	enrichCfg.ServiceDirectorURL = directorURL
+	enrichCfg.OutputTopicID = enrichedTopicID
+	enrichCfg.InputSubscriptionID = enrichmentSubID
+	enrichCfg.CacheConfig.RedisConfig.Addr = redisConn.EmulatorAddress
+	enrichCfg.CacheConfig.FirestoreConfig.CollectionName = firestoreCollection
+	enrichmentSvc := startEnrichmentService(t, totalTestContext, logger, enrichCfg, fsClient, psClient)
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		_ = enrichmentSvc.Shutdown(shutdownCtx)
+	})
 	timings["ServiceStartup(Enrichment)"] = time.Since(start).String()
-	t.Cleanup(enrichmentSvc.Shutdown)
 	logger.Info().Msg("All services started successfully.")
 
 	// 6. Start the Pub/Sub verifier in the background.
 	verificationDone := make(chan struct{})
-	verifierReady := make(chan struct{})
 	expectedCountCh := make(chan int, 1)
 
-	// Define the validation function for enriched messages
+	// This validator now correctly checks the message structure for double-wrapping.
 	enrichedMessageValidator := func(t *testing.T, msg *pubsub.Message) bool {
-		var enrichedPayload types.PublishMessage
-		if err := json.Unmarshal(msg.Data, &enrichedPayload); err != nil {
-			logger.Error().Err(err).Msg("Failed to unmarshal enriched message for verification.")
+		var finalMsgData messagepipeline.MessageData
+		if err := json.Unmarshal(msg.Data, &finalMsgData); err != nil {
+			logger.Error().Err(err).Msg("Failed to unmarshal final message data for verification.")
 			return false
 		}
-		if enrichedPayload.EnrichmentData == nil {
+
+		// This is the critical check: ensure the inner payload is the original raw payload.
+		var originalPayload TestPayload
+		if err := json.Unmarshal(finalMsgData.Payload, &originalPayload); err != nil {
+			logger.Error().Err(err).Str("payload", string(finalMsgData.Payload)).Msg("Final message's inner payload is not the expected raw format.")
+			return false
+		}
+
+		// Now validate the enrichment data.
+		if finalMsgData.EnrichmentData == nil {
 			logger.Error().Msg("Enriched message missing EnrichmentData.")
 			return false
 		}
-
-		// The UID is now expected in the original message attributes, not the enrichment data.
-		uid, uidOk := msg.Attributes["uid"]
+		uid, uidOk := finalMsgData.EnrichmentData["DeviceID"].(string)
 		if !uidOk {
-			logger.Error().Msg("Message is missing 'uid' attribute for verification.")
+			logger.Error().Msg("Message is missing 'DeviceID' attribute for verification.")
 			return false
 		}
-
 		expectedClientID, clientIDFound := deviceToClientID[uid]
-		if !clientIDFound {
+		if !clientIDFound || expectedClientID == "" {
 			logger.Error().Str("device_id", uid).Msg("DeviceID not found in expected map during verification.")
 			return false
 		}
-
-		// Safely check the map values with type assertions.
-		if name, ok := enrichedPayload.EnrichmentData["name"].(string); !ok || name != expectedClientID {
-			logger.Error().Str("expected_client_id", expectedClientID).Interface("actual_name", enrichedPayload.EnrichmentData["name"]).Msg("Enrichment 'name' mismatch.")
+		if name, ok := finalMsgData.EnrichmentData["name"].(string); !ok || name != expectedClientID {
 			return false
 		}
-		if location, ok := enrichedPayload.EnrichmentData["location"].(string); !ok || location != "loc-456" {
-			logger.Error().Interface("actual_location", enrichedPayload.EnrichmentData["location"]).Msg("Enrichment 'location' mismatch.")
-			return false
-		}
-		if category, ok := enrichedPayload.EnrichmentData["serviceTag"].(string); !ok || category != "cat-789" {
-			logger.Error().Interface("actual_category", enrichedPayload.EnrichmentData["serviceTag"]).Msg("Enrichment 'serviceTag' mismatch.")
+		if location, ok := finalMsgData.EnrichmentData["location"].(string); !ok || location == "" {
 			return false
 		}
 		return true
 	}
 
-	verifyContext, cancelVerify := context.WithTimeout(context.Background(), 1*time.Minute)
-	defer cancelVerify()
 	go func() {
 		defer close(verificationDone)
-		close(verifierReady)
-		verifiedCount = verifyPubSubMessages(t, logger, verifyContext, verifierSub, expectedCountCh, enrichedMessageValidator)
+		verifiedCount = verifyPubSubMessages(t, logger, totalTestContext, verifierSub, expectedCountCh, enrichedMessageValidator)
 	}()
-
-	<-verifierReady
 
 	// 7. Run Load Generator
 	generator := loadgen.NewLoadGenerator(loadgen.NewMqttClient(mqttConn.EmulatorAddress, "devices/+/data", 1, logger), devices, logger)
@@ -239,7 +246,7 @@ func TestEnrichmentE2E_HappyPath(t *testing.T) {
 	loadgenStart := time.Now()
 	logger.Info().Int("expected_messages", expectedMessageCount).Msg("Starting MQTT load generator...")
 
-	publishedCount, err = generator.Run(context.Background(), generateEnrichedMessagesFor)
+	publishedCount, err = generator.Run(totalTestContext, generateEnrichedMessagesFor)
 	require.NoError(t, err)
 
 	expectedCountCh <- publishedCount

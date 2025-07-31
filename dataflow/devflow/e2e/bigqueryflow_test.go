@@ -1,5 +1,8 @@
 //go:build integration
 
+// Package e2e contains end-to-end tests for dataflow pipelines.
+// This test file, bigqueryflow_test.go, validates the dataflow from MQTT ingestion
+// to a Pub/Sub topic, and then from that topic to a BigQuery sink.
 package e2e
 
 import (
@@ -8,24 +11,24 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"google.golang.org/api/iterator"
 	"net/http"
 	"os"
 	"strconv"
 	"testing"
 	"time"
 
-	bq "cloud.google.com/go/bigquery"
+	"cloud.google.com/go/bigquery"
 	"github.com/google/uuid"
-	"github.com/rs/zerolog/log"
-	"github.com/stretchr/testify/require"
-	"google.golang.org/api/option"
-
-	"github.com/illmade-knight/go-cloud-manager/microservice"
 	"github.com/illmade-knight/go-cloud-manager/microservice/servicedirector"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
+	"github.com/illmade-knight/go-dataflow-services/pkg/ingestion"
+	"github.com/illmade-knight/go-test/auth"
 	"github.com/illmade-knight/go-test/emulators"
 	"github.com/illmade-knight/go-test/loadgen"
+	"github.com/rs/zerolog/log"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/api/iterator"
+	"google.golang.org/api/option"
 )
 
 const (
@@ -35,19 +38,15 @@ const (
 )
 
 func TestFullDataflowE2E(t *testing.T) {
-	projectID := os.Getenv("GOOGLE_CLOUD_PROJECT")
-	if projectID == "" {
-		t.Skip("Skipping E2E test: GOOGLE_CLOUD_PROJECT env var must be set.")
-	}
-	if os.Getenv("GOOGLE_APPLICATION_CREDENTIALS") == "" {
-		log.Warn().Msg("GOOGLE_APPLICATION_CREDENTIALS not set, relying on Application Default Credentials (ADC).")
-		checkGCPAuth(t)
-	}
+	projectID := auth.CheckGCPAuth(t)
 
 	timings := make(map[string]string)
 	testStart := time.Now()
 	var publishedCount int
 	var expectedMessageCount int
+
+	totalTestContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	t.Cleanup(cancel)
 
 	t.Cleanup(func() {
 		timings["TotalTestDuration"] = time.Since(testStart).String()
@@ -62,9 +61,6 @@ func TestFullDataflowE2E(t *testing.T) {
 		t.Log("------------------------------------")
 	})
 
-	totalTestContext, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
-
 	logger := log.With().Str("test", "TestFullDataflowE2E").Logger()
 
 	runID := uuid.New().String()[:8]
@@ -75,7 +71,7 @@ func TestFullDataflowE2E(t *testing.T) {
 	uniqueTableID := fmt.Sprintf("dev_ingested_payloads_%s", runID)
 	logger.Info().Str("run_id", runID).Msg("Generated unique resources for test run")
 
-	schemaIdentifier := "github.com/illmade-knight/go-iot-dataflows/dataflow/devflow/e2e.TestPayload"
+	schemaIdentifier := "github.com/illmade-knight/go-dataflow-services/dataflow/devflow/e2e.TestPayload"
 	servicemanager.RegisterSchema(schemaIdentifier, TestPayload{})
 	servicesConfig := &servicemanager.MicroserviceArchitecture{
 		Environment: servicemanager.Environment{
@@ -108,9 +104,9 @@ func TestFullDataflowE2E(t *testing.T) {
 	if creds := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"); creds != "" {
 		opts = append(opts, option.WithCredentialsFile(creds))
 	}
-	bqClient, err := bq.NewClient(totalTestContext, projectID, opts...)
+	bqClient, err := bigquery.NewClient(totalTestContext, projectID, opts...)
 	require.NoError(t, err)
-	defer bqClient.Close()
+	t.Cleanup(func() { _ = bqClient.Close() })
 
 	start := time.Now()
 	mqttContainer := emulators.SetupMosquittoContainer(t, totalTestContext, emulators.GetDefaultMqttImageContainer())
@@ -118,7 +114,11 @@ func TestFullDataflowE2E(t *testing.T) {
 
 	start = time.Now()
 	directorService, directorURL := startServiceDirector(t, totalTestContext, logger.With().Str("service", "servicedirector").Logger(), servicesConfig)
-	t.Cleanup(directorService.Shutdown)
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		directorService.Shutdown(shutdownCtx)
+	})
 	timings["ServiceStartup(Director)"] = time.Since(start).String()
 
 	start = time.Now()
@@ -135,36 +135,47 @@ func TestFullDataflowE2E(t *testing.T) {
 	t.Cleanup(func() {
 		teardownStart := time.Now()
 		logger.Info().Msg("Requesting resource teardown from ServiceDirector...")
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cleanupCancel()
+
 		teardownURL := directorURL + "/orchestrate/teardown"
-		req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, teardownURL, nil)
+		req, _ := http.NewRequestWithContext(cleanupCtx, http.MethodPost, teardownURL, nil)
 		_, err = http.DefaultClient.Do(req)
 		if err != nil {
 			logger.Warn().Err(err).Msg("cleanup call failed")
 		}
 		ds := bqClient.Dataset(uniqueDatasetID)
-		if err := ds.DeleteWithContents(context.Background()); err != nil {
+		if err := ds.DeleteWithContents(cleanupCtx); err != nil {
 			logger.Warn().Err(err).Str("dataset", uniqueDatasetID).Msg("Failed to delete BigQuery dataset during cleanup.")
 		}
 		timings["CloudResourceTeardown"] = time.Since(teardownStart).String()
 	})
 
 	start = time.Now()
-	ingestionSvc := startIngestionService(t, totalTestContext, logger.With().Str("service", "ingestion").Logger(), directorURL, mqttContainer.EmulatorAddress, projectID, uniqueTopicID, dataflowName)
+	cfg := ingestion.LoadConfigDefaults(projectID)
+	cfg.DataflowName = dataflowName
+	cfg.ServiceDirectorURL = directorURL
+	cfg.OutputTopicID = uniqueTopicID
+	cfg.MQTT.Topic = "devices/+/data"
+	cfg.MQTT.BrokerURL = mqttContainer.EmulatorAddress
+	ingestionLogger := logger.With().Str("service", "ingestion").Logger()
+	ingestionSvc := startIngestionService(t, totalTestContext, ingestionLogger, cfg)
 	timings["ServiceStartup(Ingestion)"] = time.Since(start).String()
-	t.Cleanup(ingestionSvc.Shutdown)
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		_ = ingestionSvc.Shutdown(shutdownCtx)
+	})
 
 	start = time.Now()
-	// --- THE FIX ---
-	// Declare the error variable and correctly assign the service to bqSvc.
-	var bqSvc microservice.Service
-	var bqSvcErr error
-	require.Eventually(t, func() bool {
-		bqSvc, bqSvcErr = startBigQueryService(t, totalTestContext, logger.With().Str("service", "bigquery").Logger(), directorURL, projectID, uniqueSubID, uniqueDatasetID, uniqueTableID, dataflowName)
-		return bqSvcErr == nil
-	}, 30*time.Second, 5*time.Second, "BigQuery service failed to start")
-	// --- END FIX ---
+	bqLogger := logger.With().Str("service", "bigquery").Logger()
+	bqSvc := startBigQueryService(t, totalTestContext, bqLogger, projectID, uniqueSubID, uniqueDatasetID, uniqueTableID, bqTransformer)
 	timings["ServiceStartup(BigQuery)"] = time.Since(start).String()
-	t.Cleanup(bqSvc.Shutdown)
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		_ = bqSvc.Shutdown(shutdownCtx)
+	})
 	logger.Info().Msg("All services started successfully.")
 
 	loadgenStart := time.Now()
@@ -185,10 +196,10 @@ func TestFullDataflowE2E(t *testing.T) {
 	verificationStart := time.Now()
 	logger.Info().Msg("Starting BigQuery verification...")
 
-	countValidator := func(t *testing.T, iter *bq.RowIterator) error {
+	countValidator := func(t *testing.T, iter *bigquery.RowIterator) error {
 		var rowCount int
 		for {
-			var row map[string]bq.Value
+			var row map[string]bigquery.Value
 			err := iter.Next(&row)
 			if errors.Is(err, iterator.Done) {
 				break

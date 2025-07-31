@@ -6,69 +6,25 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
+	"regexp"
 	"testing"
 	"time"
 
-	"cloud.google.com/go/pubsub"
-	"cloud.google.com/go/storage"
-	"google.golang.org/api/iterator"
-
+	"cloud.google.com/go/firestore"
+	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
 	"github.com/illmade-knight/go-test/loadgen"
+	"github.com/rs/zerolog/log"
+	"github.com/stretchr/testify/require"
 )
 
-func checkGCPAuth(t *testing.T) {
-	t.Helper()
-
-	projectID := os.Getenv("GOOGLE_CLOUD_PROJECT")
-	if projectID == "" {
-		t.Skip("Skipping E2E test: GOOGLE_CLOUD_PROJECT env var must be set.")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-
-	// Step 1: Create the client. This finds credentials but doesn't validate them.
-	client, err := pubsub.NewClient(ctx, projectID)
-	if err != nil {
-		// This can still fail if there's a fundamental setup issue.
-		t.Fatalf("Failed to create Pub/Sub client for auth check: %v", err)
-	}
-	defer client.Close()
-
-	// Step 2: Force the authentication handshake by making a real API call.
-	// We try to list topics; this is a lightweight, read-only operation.
-	it := client.Topics(ctx)
-	_, err = it.Next()
-
-	// If the error is iterator.Done, it means there are no topics, which is a success for our auth check.
-	// Any other error indicates a problem, most likely with authentication.
-	if err != nil && err != iterator.Done {
-		t.Fatalf(`
-		---------------------------------------------------------------------
-		GCP AUTHENTICATION FAILED!
-		---------------------------------------------------------------------
-		The first API call to Google Cloud failed. This is most likely due
-		to expired or missing Application Default Credentials (ADC).
-
-		To fix this, please run the following command in your terminal:
-
-		gcloud auth application-default login
-
-		Original Error: %v
-		---------------------------------------------------------------------
-		`, err)
-	}
-
-	// If we reach here, the authentication check was successful.
-}
-
+// TestPayload represents a simple, raw message payload from a device.
 type TestPayload struct {
 	DeviceID  string    `json:"device_id" bigquery:"device_id"`
 	Timestamp time.Time `json:"timestamp" bigquery:"timestamp"`
 	Value     float64   `json:"value" bigquery:"value"`
 }
 
+// EnrichedTestPayload represents the final data structure after enrichment, ready for BigQuery.
 type EnrichedTestPayload struct {
 	DeviceID   string    `bigquery:"device_id"`
 	Timestamp  time.Time `bigquery:"timestamp"`
@@ -78,43 +34,132 @@ type EnrichedTestPayload struct {
 	Category   string    `bigquery:"category"`
 }
 
-// DeviceIDExtractor is a test-local implementation of the AttributeExtractor interface.
-type DeviceIDExtractor struct{}
-
-// Extract parses the JSON payload to get the device_id for test messages.
-func (e *DeviceIDExtractor) Extract(payload []byte) (map[string]string, error) {
-	var tempPayload struct {
-		DeviceID string `json:"device_id"`
-	}
-	if err := json.Unmarshal(payload, &tempPayload); err != nil {
-		return nil, fmt.Errorf("e2e extractor failed to unmarshal payload: %w", err)
-	}
-	if tempPayload.DeviceID == "" {
-		return nil, fmt.Errorf("e2e extractor: device_id field is empty in payload")
-	}
-	return map[string]string{"uid": tempPayload.DeviceID}, nil
+// DeviceInfo is the data structure for enrichment data stored in Firestore.
+type DeviceInfo struct {
+	ID         string
+	Name       string
+	ClientID   string
+	LocationID string
+	Category   string
 }
 
-// bucketHandle is your *storage.BucketHandle instance
-func getGCSBucketURL(bucketHandle *storage.BucketHandle) string {
-	bucketName := bucketHandle.BucketName()
-	return fmt.Sprintf("gcs://%s/", bucketName)
+// setupEnrichmentTestData creates devices and seeds Firestore for tests involving enrichment.
+func setupEnrichmentTestData(
+	t *testing.T,
+	ctx context.Context,
+	fsClient *firestore.Client,
+	firestoreCollection string,
+	runID string,
+	numDevices int,
+	rate float64,
+) ([]*loadgen.Device, map[string]string, func()) {
+	t.Helper()
+	devices := make([]*loadgen.Device, numDevices)
+	deviceToClientID := make(map[string]string)
+	for i := 0; i < numDevices; i++ {
+		deviceID := fmt.Sprintf("e2e-enrich-device-%d-%s", i, runID)
+		clientID := fmt.Sprintf("client-for-%s", deviceID)
+		deviceToClientID[deviceID] = clientID
+		devices[i] = &loadgen.Device{ID: deviceID, MessageRate: rate, PayloadGenerator: &testPayloadGenerator{}}
+		di := DeviceInfo{ID: deviceID, Name: fmt.Sprintf("enrich-device-%d", i), ClientID: clientID, LocationID: "loc-456", Category: "e2e-device"}
+		_, err := fsClient.Collection(firestoreCollection).Doc(deviceID).Set(ctx, di)
+		require.NoError(t, err, "Failed to set device document for %s", deviceID)
+	}
+	cleanupFunc := func() {
+		log.Info().Msg("Cleaning up Firestore documents from helper...")
+		for _, device := range devices {
+			_, err := fsClient.Collection(firestoreCollection).Doc(device.ID).Delete(context.Background())
+			if err != nil {
+				log.Warn().Err(err).Str("device_id", device.ID).Msg("Failed to cleanup firestore doc")
+			}
+		}
+	}
+	return devices, deviceToClientID, cleanupFunc
 }
 
-// If you have an object within the bucket, you'd append its path:
-func getGCSObjectURL(bucketHandle *storage.BucketHandle, objectPath string) string {
-	bucketName := bucketHandle.BucketName()
-	// Ensure objectPath doesn't start with a slash if you're constructing it this way
-	// or handle double slashes if it might.
-	return fmt.Sprintf("gcs://%s/%s", bucketName, objectPath)
+var deviceFinder = regexp.MustCompile(`^[^/]+/([^/]+)/[^/]+$`)
+
+var ingestionEnricher = func(ctx context.Context, msg *messagepipeline.Message) (bool, error) {
+	topic, ok := msg.Attributes["mqtt_topic"]
+	if !ok {
+		return false, nil
+	}
+	var deviceID string
+	if matches := deviceFinder.FindStringSubmatch(topic); len(matches) > 1 {
+		deviceID = matches[1]
+	}
+	if msg.EnrichmentData == nil {
+		msg.EnrichmentData = make(map[string]interface{})
+	}
+	msg.EnrichmentData["DeviceID"] = deviceID
+	msg.EnrichmentData["Topic"] = topic
+	msg.EnrichmentData["Timestamp"] = msg.PublishTime
+	return false, nil
 }
 
-// --- Load Generation Helper ---
+var bqTransformer = func(ctx context.Context, msg *messagepipeline.Message) (*TestPayload, bool, error) {
+	var p TestPayload
+	if err := json.Unmarshal(msg.Payload, &p); err != nil {
+		return nil, false, fmt.Errorf("failed to unmarshal payload for BQ: %w", err)
+	}
+	return &p, false, nil
+}
 
-// testPayloadGenerator implements the loadgen.PayloadGenerator for our E2E tests.
+// bqEnrichedTransformer is now pipeline-aware. It unwraps the message from the
+// enrichment service before transforming it into the final BigQuery schema.
+var bqEnrichedTransformer = func(ctx context.Context, msg *messagepipeline.Message) (*EnrichedTestPayload, bool, error) {
+	// Step 1: Unwrap the MessageData from the upstream (enrichment) service.
+	var upstreamData messagepipeline.MessageData
+	if err := json.Unmarshal(msg.Payload, &upstreamData); err != nil {
+		return nil, false, fmt.Errorf("bqTransformer: failed to unwrap upstream MessageData: %w", err)
+	}
+
+	// Step 2: Unmarshal the inner, original payload.
+	var p TestPayload
+	if err := json.Unmarshal(upstreamData.Payload, &p); err != nil {
+		return nil, false, fmt.Errorf("bqTransformer: failed to unmarshal inner TestPayload: %w", err)
+	}
+
+	// Step 3: Extract enrichment data from the unwrapped message.
+	var locationID, category, clientID string
+	if upstreamData.EnrichmentData != nil {
+		locationID, _ = upstreamData.EnrichmentData["location"].(string)
+		category, _ = upstreamData.EnrichmentData["serviceTag"].(string)
+		clientID, _ = upstreamData.EnrichmentData["name"].(string)
+	}
+
+	// Step 4: Construct the final, flat record for BigQuery.
+	return &EnrichedTestPayload{
+		DeviceID:   p.DeviceID,
+		Timestamp:  p.Timestamp,
+		Value:      p.Value,
+		ClientID:   clientID,
+		LocationID: locationID,
+		Category:   category,
+	}, false, nil
+}
+
+func BasicKeyExtractor(msg *messagepipeline.Message) (string, bool) {
+	if msg.EnrichmentData != nil {
+		if deviceID, ok := msg.EnrichmentData["DeviceID"].(string); ok && deviceID != "" {
+			return deviceID, true
+		}
+	}
+	uid, ok := msg.Attributes["uid"]
+	return uid, ok
+}
+
+func DeviceApplier(msg *messagepipeline.Message, data DeviceInfo) {
+	if msg.EnrichmentData == nil {
+		msg.EnrichmentData = make(map[string]interface{})
+	}
+	msg.EnrichmentData["name"] = data.ClientID
+	msg.EnrichmentData["location"] = data.LocationID
+	msg.EnrichmentData["serviceTag"] = data.Category
+}
+
 type testPayloadGenerator struct{}
 
-// GeneratePayload creates a simple JSON payload for testing.
 func (g *testPayloadGenerator) GeneratePayload(device *loadgen.Device) ([]byte, error) {
 	return json.Marshal(TestPayload{DeviceID: device.ID, Timestamp: time.Now().UTC(), Value: 123.45})
 }
