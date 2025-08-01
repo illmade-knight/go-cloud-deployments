@@ -37,6 +37,11 @@ func main() {
 		cfg.IceStore.ObjectPrefix = bucketPrefix
 	}
 
+	cloudRunPort := os.Getenv("PORT")
+	if cloudRunPort != "" {
+		cfg.HTTPPort = cloudRunPort
+	}
+
 	logger.Info().
 		Str("project_id", cfg.ProjectID).
 		Str("subscription_id", cfg.InputSubscriptionID).

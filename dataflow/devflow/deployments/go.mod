@@ -3,9 +3,10 @@ module devflow/deployments
 go 1.23.0
 
 require (
-	github.com/illmade-knight/go-cloud-manager v0.0.28-beta
-	github.com/illmade-knight/go-dataflow v0.1.9-beta
-	github.com/illmade-knight/go-dataflow-services v0.1.12-beta
+	cloud.google.com/go/firestore v1.18.0
+	github.com/illmade-knight/go-cloud-manager v0.1.1-beta
+	github.com/illmade-knight/go-dataflow v0.1.10-beta
+	github.com/illmade-knight/go-dataflow-services v0.1.14-beta
 	github.com/rs/zerolog v1.34.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -17,9 +18,8 @@ require (
 	cloud.google.com/go/auth v0.16.3 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
 	cloud.google.com/go/bigquery v1.69.0 // indirect
-	cloud.google.com/go/cloudbuild v1.22.2 // indirect
+	cloud.google.com/go/cloudbuild v1.22.3 // indirect
 	cloud.google.com/go/compute/metadata v0.7.0 // indirect
-	cloud.google.com/go/firestore v1.18.0 // indirect
 	cloud.google.com/go/iam v1.5.2 // indirect
 	cloud.google.com/go/longrunning v0.6.7 // indirect
 	cloud.google.com/go/monitoring v1.24.2 // indirect
@@ -82,7 +82,7 @@ require (
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
 	google.golang.org/api v0.244.0 // indirect
 	google.golang.org/genproto v0.0.0-20250603155806-513f23925822 // indirect
-	google.golang.org/genproto/googleapis/api v0.0.0-20250721164621-a45f3dfb1074 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20250728155136-f173205681a0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250728155136-f173205681a0 // indirect
 	google.golang.org/grpc v1.74.2 // indirect
 	google.golang.org/protobuf v1.36.6 // indirect

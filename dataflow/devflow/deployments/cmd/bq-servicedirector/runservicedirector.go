@@ -56,6 +56,10 @@ func main() {
 	// ensure we have a single ProjectID from here on - there should be no conflicts between cfg and arch
 	arch.ProjectID = cfg.ProjectID
 
+	cloudRunPort := os.Getenv("PORT")
+	if cloudRunPort != "" {
+		cfg.HTTPPort = cloudRunPort
+	}
 	// 4. Create the Main Director Service
 	// This uses the production constructor
 	director, err := servicedirector.NewServiceDirector(ctx, cfg, arch, logger)

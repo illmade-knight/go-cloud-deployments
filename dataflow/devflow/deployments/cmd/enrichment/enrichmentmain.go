@@ -93,6 +93,11 @@ func main() {
 		logger.Fatal().Err(err).Msg("Failed to create Redis fetcher")
 	}
 
+	cloudRunPort := os.Getenv("PORT")
+	if cloudRunPort != "" {
+		cfg.HTTPPort = cloudRunPort
+	}
+
 	// 3. Create the service wrapper, injecting the fetcher and the enricher.
 	enrichmentService, err := enrich.NewEnrichmentServiceWrapper[string, DeviceInfo](ctx, cfg, logger, redisFetcher, BasicKeyExtractor, DeviceApplier)
 	if err != nil {

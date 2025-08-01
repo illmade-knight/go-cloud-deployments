@@ -35,11 +35,8 @@ func main() {
 	runSetupResources := flag.Bool("run-setup-resources", true, "Step 3: Trigger creation of dataflow resources.")
 	runApplyIAM := flag.Bool("run-apply-iam", true, "Step 4: Apply IAM policies for dataflow services.")
 	runDeployServices := flag.Bool("run-deploy-services", true, "Step 5: Deploy all dataflow microservices.")
-
-	// REFACTOR: Updated the help text to be more explicit about when this flag is needed.
 	directorURLOverride := flag.String("director-url", "", "URL of an existing ServiceDirector. Required if -run-deploy-director=false.")
 
-	// REFACTOR: Add a custom usage message to provide detailed help.
 	flag.Usage = func() {
 		_, _ = fmt.Fprintf(os.Stderr, "Conductor - A tool for deploying a full microservice architecture.\n\n")
 		_, _ = fmt.Fprintf(os.Stderr, "This tool reads a services.yaml file, hydrates it with project-specific details,\n")
@@ -58,70 +55,59 @@ func main() {
 
 	// --- 2. Load and configure the architecture ---
 	var arch servicemanager.MicroserviceArchitecture
-	if err := yaml.Unmarshal(servicesYAML, &arch); err != nil {
+	err := yaml.Unmarshal(servicesYAML, &arch)
+	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to parse embedded services.yaml")
 	}
 	arch.ProjectID = *projectID
 	log.Info().Str("project_id", arch.ProjectID).Msg("Loaded service architecture")
 
-	if err := servicemanager.HydrateArchitecture(&arch, "cloud-deploy", ""); err != nil {
+	err = servicemanager.HydrateArchitecture(&arch, "cloud-deploy", "", log.Logger)
+	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to hydrate architecture")
 	}
-	log.Debug().Str("struct", fmt.Sprintf("%#v", arch)).Msg("Loaded service architecture")
 	log.Info().Msg("✅ Architecture hydrated successfully.")
 
 	// --- 3. Run either the deployment or teardown workflow ---
-	if *teardown {
-		runTeardown(ctx, &arch, log.Logger)
-	} else {
-		opts := orchestration.ConductorOptions{
-			SetupServiceDirectorIAM: *runSetupIAM,
-			DeployServiceDirector:   *runDeployDirector,
-			SetupDataflowResources:  *runSetupResources,
-			ApplyDataflowIAM:        *runApplyIAM,
-			DeployDataflowServices:  *runDeployServices,
-			DirectorURLOverride:     *directorURLOverride,
-		}
-		runDeployment(ctx, &arch, log.Logger, opts)
+	opts := orchestration.ConductorOptions{
+		SetupServiceDirectorIAM: *runSetupIAM,
+		DeployServiceDirector:   *runDeployDirector,
+		SetupDataflowResources:  *runSetupResources,
+		ApplyDataflowIAM:        *runApplyIAM,
+		DeployDataflowServices:  *runDeployServices,
+		DirectorURLOverride:     *directorURLOverride,
 	}
-}
 
-func runDeployment(ctx context.Context, arch *servicemanager.MicroserviceArchitecture, logger zerolog.Logger, opts orchestration.ConductorOptions) {
-	log.Info().Msg("Starting deployment conductor...")
-
-	conductor, err := orchestration.NewConductor(ctx, arch, logger, opts)
+	conductor, err := orchestration.NewConductor(ctx, &arch, log.Logger, opts)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to create conductor")
 	}
 
-	if err := conductor.Run(ctx); err != nil {
+	if *teardown {
+		runTeardown(ctx, conductor)
+	} else {
+		runDeployment(ctx, conductor)
+	}
+}
+
+func runDeployment(ctx context.Context, conductor *orchestration.Conductor) {
+	log.Info().Msg("Starting deployment conductor...")
+
+	err := conductor.Run(ctx)
+	if err != nil {
 		log.Fatal().Err(err).Msg("Conductor run failed")
 	}
 
 	log.Info().Msg("✅ Conductor successfully deployed the full architecture.")
 }
 
-func runTeardown(ctx context.Context, arch *servicemanager.MicroserviceArchitecture, logger zerolog.Logger) {
+func runTeardown(ctx context.Context, conductor *orchestration.Conductor) {
 	log.Info().Msg("Starting teardown...")
 
-	orch, err := orchestration.NewOrchestrator(ctx, arch, logger)
+	err := conductor.Teardown(ctx)
 	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to create orchestrator for teardown")
-	}
-
-	for dfName := range arch.Dataflows {
-		if err := orch.TeardownDataflowServices(ctx, dfName); err != nil {
-			log.Error().Err(err).Str("dataflow", dfName).Msg("Failed to tear down dataflow services")
-		}
-	}
-
-	if err := orch.TeardownCloudRunService(ctx, arch.ServiceManagerSpec.Name); err != nil {
-		log.Error().Err(err).Msg("Failed to tear down ServiceDirector service")
-	}
-
-	conductor, _ := orchestration.NewConductor(ctx, arch, logger, orchestration.ConductorOptions{})
-	if err := conductor.Teardown(ctx); err != nil {
-		log.Error().Err(err).Msg("Conductor framework teardown failed")
+		// Log the error but don't exit fatally, to allow for partial teardowns.
+		log.Error().Err(err).Msg("Conductor teardown failed")
 	}
 
 	log.Info().Msg("✅ Teardown complete.")

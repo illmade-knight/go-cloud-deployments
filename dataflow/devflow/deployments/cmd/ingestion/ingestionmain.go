@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"github.com/illmade-knight/go-dataflow/pkg/mqttconverter"
 	"os"
 	"os/signal"
 	"regexp"
@@ -11,7 +12,6 @@ import (
 	"github.com/illmade-knight/go-dataflow-services/pkg/ingestion"
 	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
 	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
 )
 
 // deviceFinder is a regex to extract a device ID from a standard MQTT topic structure.
@@ -41,28 +41,71 @@ func ingestionEnricher(_ context.Context, msg *messagepipeline.Message) (bool, e
 }
 
 func main() {
-	logger := log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
-	zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	// Use a console writer for pretty, human-readable logs.
+	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
+
 	ctx := context.Background()
 
-	projectID := os.Getenv("GOOGLE_CLOUD_PROJECT")
+	projectID := os.Getenv("PROJECT_ID")
 	if projectID == "" {
-		logger.Fatal().Msg("GOOGLE_CLOUD_PROJECT environment variable must be set")
+		logger.Fatal().Msg("PROJECT_ID environment variable not set")
+	}
+	// Load the configuration for the ingestion service.
+	cfg := ingestion.LoadConfigDefaults(projectID)
+
+	serviceName := os.Getenv("SERVICE_NAME")
+	dataflowName := os.Getenv("DATAFLOW_NAME")
+	serviceDirectorURL := os.Getenv("SERVICE_DIRECTOR_URL")
+
+	if serviceName == "" {
+		logger.Fatal().Msg("Service name not specified")
+	}
+	cfg.ServiceName = serviceName
+	if dataflowName == "" {
+		logger.Fatal().Msg("Dataflow name not specified")
+	}
+	cfg.DataflowName = dataflowName
+	if serviceDirectorURL == "" {
+		logger.Fatal().Msg("ServiceDirector URL not specified")
+	}
+	cfg.ServiceDirectorURL = serviceDirectorURL
+
+	// The difference here is the necessary MQTT info
+	producerTopic := os.Getenv("INGESTION-BQ_TOPIC_ID")
+	if producerTopic == "" {
+		logger.Fatal().Msg("Producer Topic not specified")
+	}
+	cfg.OutputTopicID = producerTopic
+
+	brokerURL := os.Getenv("MQTT_BROKER_URL")
+	mqttTopic := os.Getenv("MQTT_TOPIC")
+	mqttClientID := os.Getenv("MQTT_CLIENT_ID")
+	mqttUsername := os.Getenv("MQTT_USERNAME")
+	mqttPassword := os.Getenv("MQTT_PASSWORD")
+
+	cfg.MQTT.ConnectTimeout = 30 * time.Second
+
+	if brokerURL == "" || mqttTopic == "" || mqttClientID == "" || mqttUsername == "" || mqttPassword == "" {
+		logger.Fatal().Str("URL", brokerURL).Str("topic", mqttTopic).Str("clientID", mqttClientID).Str("username", mqttUsername).Msg("mqtt not correctly configured")
 	}
 
-	cfg := ingestion.LoadConfigDefaults(projectID)
-	// Override defaults with environment variables
-	if port := os.Getenv("PORT"); port != "" {
-		cfg.HTTPPort = ":" + port
+	cfg.MQTT = mqttconverter.MQTTClientConfig{
+		BrokerURL:      brokerURL,
+		Topic:          mqttTopic,
+		ClientIDPrefix: mqttClientID,
+		Username:       mqttUsername,
+		Password:       mqttPassword,
 	}
-	if topic := os.Getenv("OUTPUT_TOPIC_ID"); topic != "" {
-		cfg.OutputTopicID = topic
+
+	cloudRunPort := os.Getenv("PORT")
+	if cloudRunPort != "" {
+		cfg.HTTPPort = cloudRunPort
 	}
-	// MQTT config is loaded from env by default in LoadConfigDefaults
 
 	logger.Info().
 		Str("project_id", cfg.ProjectID).
-		Str("output_topic", cfg.OutputTopicID).
+		Str("service_name", cfg.ServiceName).
+		Str("producer_topic_id", cfg.OutputTopicID).
 		Str("mqtt_broker", cfg.MQTT.BrokerURL).
 		Msg("Preparing to start Ingestion service")
 

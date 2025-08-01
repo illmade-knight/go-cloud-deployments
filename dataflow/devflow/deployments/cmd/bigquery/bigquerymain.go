@@ -64,28 +64,57 @@ func enrichedMessageTransformer(_ context.Context, msg *messagepipeline.Message)
 }
 
 func main() {
-	logger := log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
-	zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
+
 	ctx := context.Background()
 
-	projectID := os.Getenv("GOOGLE_CLOUD_PROJECT")
+	projectID := os.Getenv("PROJECT_ID")
 	if projectID == "" {
-		logger.Fatal().Msg("GOOGLE_CLOUD_PROJECT environment variable must be set")
+		logger.Fatal().Msg("PROJECT_ID environment variable not set")
 	}
 
+	// Load configuration using the flexible method that supports flags.
 	cfg := bigqueries.LoadConfigDefaults(projectID)
-	// Override defaults with env vars
-	if port := os.Getenv("PORT"); port != "" {
-		cfg.HTTPPort = ":" + port
+
+	dataflowName := os.Getenv("DATAFLOW_NAME")
+	if dataflowName == "" {
+		log.Fatal().Msg("Dataflow name not specified")
 	}
-	if subID := os.Getenv("INPUT_SUBSCRIPTION_ID"); subID != "" {
-		cfg.InputSubscriptionID = subID
+	cfg.DataflowName = dataflowName
+
+	serviceDirectorURL := os.Getenv("SERVICE_DIRECTOR_URL")
+	if serviceDirectorURL == "" {
+		log.Fatal().Msg("ServiceDirector URL not specified")
 	}
-	if dataset := os.Getenv("BIGQUERY_DATASET"); dataset != "" {
-		cfg.BigQueryConfig.DatasetID = dataset
+	cfg.ServiceDirectorURL = serviceDirectorURL
+
+	serviceName := os.Getenv("SERVICE_NAME")
+	if serviceName == "" {
+		logger.Fatal().Msg("Service name not specified")
 	}
-	if table := os.Getenv("BIGQUERY_TABLE"); table != "" {
-		cfg.BigQueryConfig.TableID = table
+	cfg.ServiceName = serviceName
+
+	subID := os.Getenv("BQ-SUBSCRIPTION_SUBSCRIPTION_ID")
+	if subID == "" {
+		log.Fatal().Msg("Input subscription ID not specified")
+	}
+	cfg.InputSubscriptionID = subID
+
+	dataset := os.Getenv("BIGQUERY_DATASET")
+	if dataset == "" {
+		log.Fatal().Msg("BigQuery dataset not specified")
+	}
+	cfg.BigQueryConfig.DatasetID = dataset
+
+	table := os.Getenv("BIGQUERY_TABLE")
+	if table == "" {
+		log.Fatal().Msg("BigQuery table not specified")
+	}
+	cfg.BigQueryConfig.TableID = table
+
+	cloudRunPort := os.Getenv("PORT")
+	if cloudRunPort == "" {
+		cfg.HTTPPort = cloudRunPort
 	}
 
 	logger.Info().
@@ -101,7 +130,7 @@ func main() {
 	}
 
 	go func() {
-		if err := bqService.Start(ctx); err != nil {
+		if err = bqService.Start(ctx); err != nil {
 			logger.Fatal().Err(err).Msg("Failed to start BigQuery Service")
 		}
 	}()
@@ -114,7 +143,7 @@ func main() {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if err := bqService.Shutdown(shutdownCtx); err != nil {
+	if err = bqService.Shutdown(shutdownCtx); err != nil {
 		logger.Error().Err(err).Msg("BigQuery Service shutdown failed")
 	} else {
 		log.Info().Msg("BigQuery Service stopped.")

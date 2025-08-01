@@ -155,8 +155,12 @@ func TestEnrichmentBigQueryIceStoreE2E(t *testing.T) {
 		directorService.Shutdown(shutdownCtx)
 	})
 
+	// REFACTOR: Use a context-aware HTTP request to prevent hangs.
 	setupURL := directorURL + "/dataflow/setup"
-	resp, err := http.Post(setupURL, "application/json", bytes.NewBuffer([]byte{}))
+	req, err := http.NewRequestWithContext(totalTestContext, http.MethodPost, setupURL, bytes.NewBuffer([]byte{}))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	_ = resp.Body.Close()
@@ -172,6 +176,8 @@ func TestEnrichmentBigQueryIceStoreE2E(t *testing.T) {
 		teardownURL := directorURL + "/orchestrate/teardown"
 		req, _ := http.NewRequestWithContext(cleanupCtx, http.MethodPost, teardownURL, nil)
 		_, _ = http.DefaultClient.Do(req)
+
+		// Fallback direct cleanup.
 		_ = bqClient.Dataset(uniqueDatasetID).DeleteWithContents(cleanupCtx)
 		bucket := gcsClient.Bucket(uniqueBucketName)
 		it := bucket.Objects(cleanupCtx, nil)
@@ -181,7 +187,10 @@ func TestEnrichmentBigQueryIceStoreE2E(t *testing.T) {
 				break
 			}
 			if err == nil {
-				_ = bucket.Object(attrs.Name).Delete(cleanupCtx)
+				// REFACTOR: Log errors during cleanup instead of ignoring them.
+				if delErr := bucket.Object(attrs.Name).Delete(cleanupCtx); delErr != nil {
+					logger.Warn().Err(delErr).Str("object", attrs.Name).Msg("Failed to delete GCS object during cleanup.")
+				}
 			}
 		}
 		_ = bucket.Delete(cleanupCtx)

@@ -58,12 +58,12 @@ dataflows:
     # BEFORE the application services are deployed.
     resources:
       topics:
-        - name: "ingestion-topic-bq"
+        - name: "ingestion-bq"
           # ADDED: Explicitly link this topic to its producer service.
           producer_service: "ingestion-service"
       subscriptions:
         - name: "bq-subscription"
-          topic: "ingestion-topic-bq"
+          topic: "ingestion-bq"
           # ADDED: Explicitly link this subscription to its consumer service.
           consumer_service: "bigquery-service"
       bigquery_datasets:
