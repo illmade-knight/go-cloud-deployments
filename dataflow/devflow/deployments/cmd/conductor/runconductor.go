@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/illmade-knight/go-cloud-manager/pkg/orchestration"
@@ -68,7 +69,13 @@ func main() {
 	}
 	log.Info().Msg("✅ Architecture hydrated successfully.")
 
-	// --- 3. Run either the deployment or teardown workflow ---
+	// --- 3. Copy YAML to Director's source for deployment ---
+	err = copyYAMLToDirectorSource(&arch)
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to copy services.yaml to director source")
+	}
+
+	// --- 4. Run either the deployment or teardown workflow ---
 	opts := orchestration.ConductorOptions{
 		SetupServiceDirectorIAM: *runSetupIAM,
 		DeployServiceDirector:   *runDeployDirector,
@@ -88,6 +95,30 @@ func main() {
 	} else {
 		runDeployment(ctx, conductor)
 	}
+}
+
+// copyYAMLToDirectorSource writes the embedded services.yaml content to the
+// source directory of the ServiceDirector service. This ensures the file is
+// included in the source archive that gets uploaded for the build.
+func copyYAMLToDirectorSource(arch *servicemanager.MicroserviceArchitecture) error {
+	if arch.ServiceManagerSpec.Deployment == nil || arch.ServiceManagerSpec.Deployment.SourcePath == "" {
+		return fmt.Errorf("ServiceManagerSpec.Deployment.SourcePath is not defined in the architecture")
+	}
+
+	//it's the BuildableModulePath we want not SourcePath as the source path is path of all the code i.e where the mod file is
+	directorSourcePath := arch.ServiceManagerSpec.Deployment.BuildableModulePath
+	destinationPath := filepath.Join(directorSourcePath, "services.yaml")
+
+	log.Info().Str("destination", destinationPath).Msg("Copying embedded services.yaml to ServiceDirector source directory...")
+
+	// Write the embedded YAML content to the destination file.
+	// 0644 provides standard read/write permissions for the owner and read for others.
+	err := os.WriteFile(destinationPath, servicesYAML, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to write services.yaml to %s: %w", destinationPath, err)
+	}
+	log.Info().Msg("✅ Successfully copied services.yaml.")
+	return nil
 }
 
 func runDeployment(ctx context.Context, conductor *orchestration.Conductor) {

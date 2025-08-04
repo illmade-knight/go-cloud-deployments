@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -46,7 +47,7 @@ func ReadMessagesFromGCS(
 
 	for {
 		attrs, err := it.Next()
-		if err == iterator.Done {
+		if errors.Is(err, iterator.Done) {
 			break // No more objects
 		}
 		if err != nil {
@@ -62,7 +63,7 @@ func ReadMessagesFromGCS(
 
 		gzr, err := gzip.NewReader(rc)
 		if err != nil {
-			rc.Close() // Close the underlying reader if gzip fails
+			_ = rc.Close() // Close the underlying reader if gzip fails
 			replayLogger.Warn().Err(err).Str("object", attrs.Name).Msg("Failed to create gzip reader, skipping.")
 			continue
 		}
@@ -88,8 +89,8 @@ func ReadMessagesFromGCS(
 			replayLogger.Warn().Err(err).Str("object", attrs.Name).Msg("Error reading GCS object with scanner.")
 		}
 
-		gzr.Close() // Close gzip reader
-		rc.Close()  // Close object reader
+		_ = gzr.Close() // Close gzip reader
+		_ = rc.Close()  // Close object reader
 	}
 	replayLogger.Info().Int("num_devices", len(deviceMessages)).Msg("Finished reading messages from GCS.")
 	return deviceMessages, nil

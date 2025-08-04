@@ -12,7 +12,6 @@ import (
 	"github.com/illmade-knight/go-dataflow-services/pkg/bigqueries"
 	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
 	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
 )
 
 // EnrichedPayload defines the structure of the data we expect to receive
@@ -65,26 +64,24 @@ func enrichedMessageTransformer(_ context.Context, msg *messagepipeline.Message)
 
 func main() {
 	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
-
 	ctx := context.Background()
 
+	// --- Configuration Loading ---
 	projectID := os.Getenv("PROJECT_ID")
 	if projectID == "" {
 		logger.Fatal().Msg("PROJECT_ID environment variable not set")
 	}
-
-	// Load configuration using the flexible method that supports flags.
 	cfg := bigqueries.LoadConfigDefaults(projectID)
 
 	dataflowName := os.Getenv("DATAFLOW_NAME")
 	if dataflowName == "" {
-		log.Fatal().Msg("Dataflow name not specified")
+		logger.Fatal().Msg("Dataflow name not specified")
 	}
 	cfg.DataflowName = dataflowName
 
 	serviceDirectorURL := os.Getenv("SERVICE_DIRECTOR_URL")
 	if serviceDirectorURL == "" {
-		log.Fatal().Msg("ServiceDirector URL not specified")
+		logger.Fatal().Msg("ServiceDirector URL not specified")
 	}
 	cfg.ServiceDirectorURL = serviceDirectorURL
 
@@ -94,29 +91,30 @@ func main() {
 	}
 	cfg.ServiceName = serviceName
 
-	subID := os.Getenv("BQ-SUBSCRIPTION_SUBSCRIPTION_ID")
+	subID := os.Getenv("BQ_INGESTION_SUB_ID")
 	if subID == "" {
-		log.Fatal().Msg("Input subscription ID not specified")
+		logger.Fatal().Msg("Input subscription ID not specified")
 	}
 	cfg.InputSubscriptionID = subID
 
 	dataset := os.Getenv("BIGQUERY_DATASET")
 	if dataset == "" {
-		log.Fatal().Msg("BigQuery dataset not specified")
+		logger.Fatal().Msg("BigQuery dataset not specified")
 	}
 	cfg.BigQueryConfig.DatasetID = dataset
 
 	table := os.Getenv("BIGQUERY_TABLE")
 	if table == "" {
-		log.Fatal().Msg("BigQuery table not specified")
+		logger.Fatal().Msg("BigQuery table not specified")
 	}
 	cfg.BigQueryConfig.TableID = table
 
 	cloudRunPort := os.Getenv("PORT")
-	if cloudRunPort == "" {
+	if cloudRunPort != "" {
 		cfg.HTTPPort = cloudRunPort
 	}
 
+	// --- Service Initialization ---
 	logger.Info().
 		Str("project_id", cfg.ProjectID).
 		Str("subscription_id", cfg.InputSubscriptionID).
@@ -129,23 +127,27 @@ func main() {
 		logger.Fatal().Err(err).Msg("Failed to create BigQuery Service")
 	}
 
+	// EDITED: The main logic is now cleaner and correctly handles the blocking Start method.
 	go func() {
-		if err = bqService.Start(ctx); err != nil {
-			logger.Fatal().Err(err).Msg("Failed to start BigQuery Service")
+		logger.Info().Str("port", bqService.GetHTTPPort()).Msg("BigQuery Service starting...")
+		if err := bqService.Start(ctx); err != nil {
+			logger.Error().Err(err).Msg("BigQuery Service failed during runtime")
 		}
 	}()
-	log.Info().Str("port", bqService.GetHTTPPort()).Msg("BigQuery Service is running")
 
+	// Wait for a shutdown signal. This now correctly blocks the main function.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
-	log.Info().Msg("Shutdown signal received, stopping BigQuery Service...")
 
+	// --- Graceful Shutdown ---
+	logger.Info().Msg("Shutdown signal received, stopping BigQuery Service...")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if err = bqService.Shutdown(shutdownCtx); err != nil {
+
+	if err := bqService.Shutdown(shutdownCtx); err != nil {
 		logger.Error().Err(err).Msg("BigQuery Service shutdown failed")
 	} else {
-		log.Info().Msg("BigQuery Service stopped.")
+		logger.Info().Msg("BigQuery Service stopped.")
 	}
 }

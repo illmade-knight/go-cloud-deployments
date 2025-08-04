@@ -142,7 +142,9 @@ func accessSecretVersion(name string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to create secretmanager client: %w", err)
 	}
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	req := &secretmanagerpb.AccessSecretVersionRequest{
 		Name: name,

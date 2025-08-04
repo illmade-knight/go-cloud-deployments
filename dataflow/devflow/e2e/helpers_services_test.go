@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"cloud.google.com/go/firestore"
-	"cloud.google.com/go/pubsub"
 	"github.com/illmade-knight/go-cloud-manager/microservice/servicedirector"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 
@@ -31,14 +30,33 @@ import (
 // startServiceDirector correctly initializes and starts the ServiceDirector for testing.
 func startServiceDirector(t *testing.T, ctx context.Context, logger zerolog.Logger, arch *servicemanager.MicroserviceArchitecture) (*servicedirector.Director, string) {
 	t.Helper()
-	directorCfg := &servicedirector.Config{BaseConfig: microservice.BaseConfig{HTTPPort: ":0"}}
+	directorCfg := &servicedirector.Config{BaseConfig: microservice.BaseConfig{HTTPPort: ":0"}} // Use a random available port
 	director, err := servicedirector.NewServiceDirector(ctx, directorCfg, arch, logger)
 	require.NoError(t, err)
 
-	err = director.Start()
-	require.NoError(t, err)
+	// Start the director's blocking Start() method in a background goroutine.
+	go func() {
+		if startErr := director.Start(); startErr != nil && !errors.Is(startErr, http.ErrServerClosed) {
+			t.Errorf("ServiceDirector failed during test execution: %v", startErr)
+		}
+	}()
 
-	baseURL := "http://127.0.0.1" + director.GetHTTPPort()
+	// Poll the health check endpoint until the service is ready.
+	var baseURL string
+	require.Eventually(t, func() bool {
+		port := director.GetHTTPPort()
+		if port == "" || port == ":0" {
+			return false // Port not yet assigned
+		}
+		baseURL = "http://127.0.0.1" + port
+		resp, httpErr := http.Get(baseURL + "/healthz")
+		if httpErr != nil {
+			return false // Server not yet listening
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	}, 15*time.Second, 250*time.Millisecond, "ServiceDirector health check did not become OK")
+
 	return director, baseURL
 }
 
@@ -72,7 +90,7 @@ func startIngestionService(t *testing.T, ctx context.Context, logger zerolog.Log
 }
 
 // startEnrichmentService starts the enrichment service, correctly assembling the cache fetcher.
-func startEnrichmentService(t *testing.T, ctx context.Context, logger zerolog.Logger, cfg *enrich.Config, fsClient *firestore.Client, psClient *pubsub.Client) microservice.Service {
+func startEnrichmentService(t *testing.T, ctx context.Context, logger zerolog.Logger, cfg *enrich.Config, fsClient *firestore.Client) microservice.Service {
 	t.Helper()
 
 	// Assemble the Fetcher using the new Decorator Pattern.

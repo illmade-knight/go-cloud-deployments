@@ -148,7 +148,9 @@ func verifyBigQueryRows(
 
 	client, err := bq.NewClient(ctx, projectID)
 	require.NoError(t, err)
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	// 1. Poll until the expected number of rows appears.
 	countQuery := fmt.Sprintf("SELECT COUNT(*) as count FROM `%s.%s.%s`", projectID, datasetID, tableID)
@@ -205,14 +207,20 @@ func verifyGCSResults(t *testing.T, logger zerolog.Logger, ctx context.Context, 
 				verifierLogger.Warn().Err(err).Str("object", attrs.Name).Msg("Failed to create GCS object reader")
 				continue
 			}
-			defer rc.Close()
+			// should we use defer in loop here, check this?
+			defer func() {
+				_ = rc.Close()
+			}()
 
 			gzr, err := gzip.NewReader(rc)
 			if err != nil {
 				verifierLogger.Warn().Err(err).Str("object", attrs.Name).Msg("Failed to create gzip reader")
 				continue
 			}
-			defer gzr.Close()
+			// should we use defer in loop here?
+			defer func() {
+				_ = gzr.Close()
+			}()
 
 			scanner := bufio.NewScanner(gzr)
 			for scanner.Scan() {

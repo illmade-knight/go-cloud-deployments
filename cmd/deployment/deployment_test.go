@@ -30,7 +30,9 @@ func TestBuildableVariableIsolator(t *testing.T) {
 
 	storageClient, err := storage.NewClient(ctx)
 	require.NoError(t, err)
-	defer storageClient.Close()
+	t.Cleanup(func() {
+		_ = storageClient.Close()
+	})
 
 	// --- 1. Create a temporary 'toy' source directory ---
 	// These files have no external or internal dependencies.
@@ -48,7 +50,7 @@ func TestBuildableVariableIsolator(t *testing.T) {
 	err = uploadDirToGCS(ctx, storageClient, sourceDir, sourceBucketName, sourceObject)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		storageClient.Bucket(sourceBucketName).Object(sourceObject).Delete(context.Background())
+		_ = storageClient.Bucket(sourceBucketName).Object(sourceObject).Delete(context.Background())
 	})
 
 	// --- 3. Define a minimal build request to test the variable ---
@@ -91,7 +93,9 @@ func TestBuildableVariableIsolator(t *testing.T) {
 	t.Log("Triggering isolated build to test GOOGLE_BUILDABLE...")
 	buildClient, err := cloudbuild.NewClient(ctx)
 	require.NoError(t, err)
-	defer buildClient.Close()
+	defer func() {
+		_ = buildClient.Close()
+	}()
 
 	op, err := buildClient.CreateBuild(ctx, req)
 	require.NoError(t, err)
@@ -145,7 +149,9 @@ func TestGoogleBuildableVariable(t *testing.T) {
 
 	storageClient, err := storage.NewClient(ctx)
 	require.NoError(t, err)
-	defer storageClient.Close()
+	defer func() {
+		_ = storageClient.Close()
+	}()
 
 	// --- 1. Create a temporary 'toy' source directory ---
 	toySource := map[string]string{
@@ -156,7 +162,7 @@ func TestGoogleBuildableVariable(t *testing.T) {
 		"cmd/realapp/main.go": `package main; func main() { println("correct main") }`,
 	}
 	sourceDir, cleanupSourceDir := createTestSourceDir(t, toySource)
-	defer cleanupSourceDir()
+	t.Cleanup(cleanupSourceDir)
 
 	// --- 2. Upload the toy source to GCS ---
 	sourceBucketName := fmt.Sprintf("%s_cloudbuild", projectID)
@@ -164,7 +170,7 @@ func TestGoogleBuildableVariable(t *testing.T) {
 	err = uploadDirToGCS(ctx, storageClient, sourceDir, sourceBucketName, sourceObject)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		storageClient.Bucket(sourceBucketName).Object(sourceObject).Delete(context.Background())
+		_ = storageClient.Bucket(sourceBucketName).Object(sourceObject).Delete(context.Background())
 	})
 
 	// --- 3. Define a minimal build request to test the variable ---
@@ -207,7 +213,9 @@ func TestGoogleBuildableVariable(t *testing.T) {
 	t.Log("Triggering minimal build to test GOOGLE_BUILDABLE...")
 	buildClient, err := cloudbuild.NewClient(ctx)
 	require.NoError(t, err)
-	defer buildClient.Close()
+	t.Cleanup(func() {
+		_ = buildClient.Close()
+	})
 
 	op, err := buildClient.CreateBuild(ctx, req)
 	require.NoError(t, err)
@@ -245,7 +253,12 @@ func createTestSourceDir(t *testing.T, files map[string]string) (string, func())
 		require.NoError(t, err, "Failed to write source file")
 	}
 
-	return tmpDir, func() { os.RemoveAll(tmpDir) }
+	return tmpDir, func() {
+		err = os.RemoveAll(tmpDir)
+		if err != nil {
+			t.Logf("Failed to remove temporary source directory: %v", err)
+		}
+	}
 }
 
 // Helper function to upload a directory to GCS as a tar.gz archive.
@@ -282,7 +295,9 @@ func uploadDirToGCS(ctx context.Context, client *storage.Client, sourceDir, buck
 		if err != nil {
 			return err
 		}
-		defer file.Close()
+		defer func() {
+			_ = file.Close()
+		}()
 		_, err = io.Copy(tarWriter, file)
 		return err
 	})
@@ -290,12 +305,12 @@ func uploadDirToGCS(ctx context.Context, client *storage.Client, sourceDir, buck
 	if err != nil {
 		return fmt.Errorf("failed to walk source directory '%s': %w", sourceDir, err)
 	}
-	tarWriter.Close()
-	gzipWriter.Close()
+	_ = tarWriter.Close()
+	_ = gzipWriter.Close()
 
 	w := client.Bucket(bucket).Object(objectName).NewWriter(ctx)
 	if _, err = io.Copy(w, buf); err != nil {
-		w.Close() // Close writer on error
+		_ = w.Close() // Close writer on error
 		return fmt.Errorf("failed to copy source to GCS: %w", err)
 	}
 	return w.Close()

@@ -197,7 +197,7 @@ func TestEnrichmentToBigQueryE2E(t *testing.T) {
 	enrichCfg.InputSubscriptionID = enrichmentSubID
 	enrichCfg.CacheConfig.RedisConfig.Addr = redisConn.EmulatorAddress
 	enrichCfg.CacheConfig.FirestoreConfig.CollectionName = firestoreCollection
-	enrichmentSvc := startEnrichmentService(t, totalTestContext, logger, enrichCfg, fsClient, psClient)
+	enrichmentSvc := startEnrichmentService(t, totalTestContext, logger, enrichCfg, fsClient)
 	timings["ServiceStartup(Enrichment)"] = time.Since(start).String()
 	t.Cleanup(func() {
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)

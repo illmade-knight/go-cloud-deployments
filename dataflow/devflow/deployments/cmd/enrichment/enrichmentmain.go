@@ -81,7 +81,9 @@ func main() {
 	}
 	// The service will close the fetcher, which will close the redis client.
 	// We are responsible for closing the firestore client.
-	defer fsClient.Close()
+	defer func() {
+		_ = fsClient.Close()
+	}()
 
 	firestoreFetcher, err := cache.NewFirestore[string, DeviceInfo](ctx, cfg.CacheConfig.FirestoreConfig, fsClient, logger)
 	if err != nil {

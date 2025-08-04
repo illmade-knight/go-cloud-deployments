@@ -72,4 +72,5 @@ APP_MQTT_USERNAME: "sreceiver"
           clustering_fields: ["device_id"]
 
 
-gcloud run deploy mochi --source . --port 1883 --ingress=all  --region=us-central1   --set-env-vars="CLIENT_USER=lclient, SERVICE_USER=sreceiver"  
+gcloud run deploy mochi --source . --ingress=all  --region=europe-west2
+--set-env-vars="GCP_PROJECT_ID=gemini-power-test, SUB_ID=mochi-passthrough-sub, CLIENT_USER=lclient, SERVICE_USER=sreceiver" 

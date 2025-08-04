@@ -36,7 +36,7 @@ dataflows:
               value_from: "SERVICE_PASS" # The name of the secret in Secret Manager
           environment_vars:
             # REMOVED: PUBSUB_TOPIC_ID is now injected by the hydration step.
-            MQTT_BROKER_URL: "tcp://mochi-885150127230.us-central1.run.app:1883"
+            MQTT_BROKER_URL: "tcp://10.154.0.5:1883"
             MQTT_USERNAME: "sreceiver"
             MQTT_TOPIC: "devices/+/data"
             MQTT_CLIENT_ID: "test-client-devflow"
@@ -59,12 +59,10 @@ dataflows:
     resources:
       topics:
         - name: "ingestion-bq"
-          # ADDED: Explicitly link this topic to its producer service.
           producer_service: "ingestion-service"
       subscriptions:
-        - name: "bq-subscription"
+        - name: "bq-ingestion"
           topic: "ingestion-bq"
-          # ADDED: Explicitly link this subscription to its consumer service.
           consumer_service: "bigquery-service"
       bigquery_datasets:
         - name: "iot_data_bq"

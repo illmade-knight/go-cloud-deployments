@@ -1,0 +1,17 @@
+{
+  "duration_seconds": 10,
+  "topic_pattern": "devices/+/data",
+  "qos": 1,
+  "devices": [
+    {
+      "id": "garden-monitor-001",
+      "message_rate_hz": 2,
+      "payload_generator": "gardenMonitor"
+    },
+    {
+      "id": "garden-monitor-002",
+      "message_rate_hz": 0.5,
+      "payload_generator": "gardenMonitor"
+    }
+  ]
+}

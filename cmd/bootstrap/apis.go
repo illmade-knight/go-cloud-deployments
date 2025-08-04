@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"os"
 	"time"
 
 	"google.golang.org/api/serviceusage/v1"
@@ -18,7 +17,6 @@ func main() {
 
 	if *projectID == "" {
 		log.Fatal("Error: -project-id flag is required.")
-		os.Exit(1)
 	}
 
 	log.Println("Starting full IAM and API setup for Cloud Run...")
