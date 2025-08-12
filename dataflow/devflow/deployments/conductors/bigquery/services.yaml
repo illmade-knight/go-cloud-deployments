@@ -35,7 +35,6 @@ dataflows:
             - name: "MQTT_PASSWORD"
               value_from: "SERVICE_PASS" # The name of the secret in Secret Manager
           environment_vars:
-            # REMOVED: PUBSUB_TOPIC_ID is now injected by the hydration step.
             MQTT_BROKER_URL: "tcp://10.154.0.5:1883"
             MQTT_USERNAME: "sreceiver"
             MQTT_TOPIC: "devices/+/data"
@@ -50,7 +49,6 @@ dataflows:
           source_path: "."
           buildable_module_path: "cmd/bigquery" # Path to your BigQuery service code
           environment_vars:
-            # REMOVED: SUBSCRIPTION_ID is now injected by the hydration step.
             BIGQUERY_DATASET: "iot_data_bq"
             BIGQUERY_TABLE: "ingested_payloads_bq"
 
@@ -59,15 +57,20 @@ dataflows:
     resources:
       topics:
         - name: "ingestion-bq"
-          producer_service: "ingestion-service"
+          producer_service:
+            name: "ingestion-service"
       subscriptions:
         - name: "bq-ingestion"
           topic: "ingestion-bq"
-          consumer_service: "bigquery-service"
+          consumer_service:
+            name: "bigquery-service"
       bigquery_datasets:
         - name: "iot_data_bq"
       bigquery_tables:
         - name: "ingested_payloads_bq"
+          producers:
+            - name: "bigquery-service"
+#              env: "BIGQUERY_WRITE_TABLE" # Add the 'env' key here
           dataset: "iot_data_bq"
           schema_type: "github.com/illmade-knight/go-dataflow-service/dataflow/devflow/EnrichedTestPayload"
           clustering_fields: ["device_id"]

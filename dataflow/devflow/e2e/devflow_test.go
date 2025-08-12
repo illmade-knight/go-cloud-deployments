@@ -37,7 +37,7 @@ func TestDevflowE2E(t *testing.T) {
 	totalTestContext, cancel := context.WithTimeout(context.Background(), totalDevflowTestDuration)
 	t.Cleanup(cancel)
 
-	projectID := auth.CheckGCPAuth(t)
+	projectID := auth.CheckGCPAdvancedAuth(t, true)
 
 	// --- Timing & Metrics Setup ---
 	timings := make(map[string]string)

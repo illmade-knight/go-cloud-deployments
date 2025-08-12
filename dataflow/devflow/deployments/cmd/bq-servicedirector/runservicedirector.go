@@ -3,21 +3,22 @@ package main
 import (
 	"context"
 	_ "embed"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
 	"github.com/illmade-knight/go-cloud-manager/microservice/servicedirector"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"gopkg.in/yaml.v3"
-	"os"
-	"os/signal"
-	"syscall"
-	"time"
 )
 
 //go:embed services.yaml
 var servicesYAML []byte
 
-// TestPayload defines the structure of the data we expect to receive
+// EnrichedTestPayload defines the structure of the data we expect to receive
 // from Pub/Sub and insert into BigQuery. The `bigquery` tags are crucial
 // for the BQ client to map struct fields to table columns.
 type EnrichedTestPayload struct {

@@ -64,10 +64,12 @@ func startServiceDirector(t *testing.T, ctx context.Context, logger zerolog.Logg
 func startIngestionService(t *testing.T, ctx context.Context, logger zerolog.Logger, cfg *ingestion.Config) microservice.Service {
 	t.Helper()
 
+	cfg.HTTPPort = ":"
 	wrapper, err := ingestion.NewIngestionServiceWrapper(ctx, cfg, logger, ingestionEnricher)
 	require.NoError(t, err)
 
 	go func() {
+		t.Log("starting IngestionService")
 		if startErr := wrapper.Start(ctx); startErr != nil && !errors.Is(startErr, http.ErrServerClosed) {
 			t.Errorf("IngestionService failed during test execution: %v", startErr)
 		}
@@ -102,6 +104,7 @@ func startEnrichmentService(t *testing.T, ctx context.Context, logger zerolog.Lo
 	redisFetcher, err := cache.NewRedisCache[string, DeviceInfo](ctx, &cfg.CacheConfig.RedisConfig, logger, firestoreFetcher)
 	require.NoError(t, err)
 
+	cfg.HTTPPort = ":"
 	// The wrapper now takes the fully composed fetcher.
 	wrapper, err := enrich.NewEnrichmentServiceWrapper[string, DeviceInfo](ctx, cfg, logger, redisFetcher, BasicKeyExtractor, DeviceApplier)
 	require.NoError(t, err)
@@ -126,6 +129,7 @@ func startBigQueryService(t *testing.T, ctx context.Context, logger zerolog.Logg
 	cfg.BatchProcessing.BatchSize = 15
 	cfg.BatchProcessing.FlushInterval = 5 * time.Second
 
+	cfg.HTTPPort = ":"
 	wrapper, err := bigqueries.NewBQServiceWrapper[TestPayload](ctx, cfg, logger, transformer)
 	require.NoError(t, err)
 
@@ -153,6 +157,7 @@ func startEnrichedBigQueryService(t *testing.T, ctx context.Context, logger zero
 	cfg.BatchProcessing.NumWorkers = 2
 	cfg.BatchProcessing.FlushInterval = 5 * time.Second
 
+	cfg.HTTPPort = ":"
 	wrapper, err := bigqueries.NewBQServiceWrapper[EnrichedTestPayload](ctx, cfg, logger, transformer)
 	if err != nil {
 		return nil, err

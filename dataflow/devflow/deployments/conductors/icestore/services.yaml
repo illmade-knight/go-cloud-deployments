@@ -1,0 +1,71 @@
+# services.yaml
+name: "ice-dataflow"
+region: "europe-west2"
+
+# service_manager_spec describes the ServiceDirector service itself.
+# The Conductor will deploy this service first.
+service_manager_spec:
+  name: "servicedirector-ice-flow"
+  service_account: "servicedirector-ice-sa"
+  deployment:
+    source_path: "."
+    buildable_module_path: "cmd/bq-servicedirector"
+
+    environment_vars:
+      # These topics are used for communication between the Conductor and the Director.
+      PROJECT_ID: "replace-during-hydration"
+      SD_COMMAND_TOPIC: "director-commands-bq"
+      SD_COMPLETION_TOPIC: "director-events-bq"
+      SD_COMMAND_SUBSCRIPTION: "director-command-sub-bq"
+
+# dataflows describes one or more independent data processing pipelines.
+dataflows:
+  bigquery-flow:
+    # services lists the application microservices to be deployed.
+    services:
+      ingestion-service:
+        name: "ingestion-service"
+        service_account: "ingestion-sa"
+        dependencies:
+          - "servicedirector-bq-flow"
+        deployment:
+          source_path: "."
+          buildable_module_path: "cmd/ingestion" # Path to your ingestion service code
+          secret_environment_vars:
+            - name: "MQTT_PASSWORD"
+              value_from: "SERVICE_PASS" # The name of the secret in Secret Manager
+          environment_vars:
+            MQTT_BROKER_URL: "tcp://10.154.0.5:1883"
+            MQTT_USERNAME: "sreceiver"
+            MQTT_TOPIC: "devices/+/data"
+            MQTT_CLIENT_ID: "test-client-devflow"
+
+      bigquery-service:
+        name: "bigquery-service"
+        service_account: "bigquery-sa"
+        dependencies:
+          - "servicedirector-bq-flow"
+        deployment:
+          source_path: "."
+          buildable_module_path: "cmd/bigquery" # Path to your BigQuery service code
+          environment_vars:
+            BIGQUERY_DATASET: "iot_data_bq"
+            BIGQUERY_TABLE: "ingested_payloads_bq"
+
+    # resources lists the cloud infrastructure the ServiceDirector must create
+    # BEFORE the application services are deployed.
+    resources:
+      topics:
+        - name: "ingestion-bq"
+          producer_service: "ingestion-service"
+      subscriptions:
+        - name: "bq-ingestion"
+          topic: "ingestion-bq"
+          consumer_service: "bigquery-service"
+      bigquery_datasets:
+        - name: "iot_data_bq"
+      bigquery_tables:
+        - name: "ingested_payloads_bq"
+          dataset: "iot_data_bq"
+          schema_type: "github.com/illmade-knight/go-dataflow-service/dataflow/devflow/EnrichedTestPayload"
+          clustering_fields: ["device_id"]
