@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"os"
 	"os/signal"
 	"syscall"
@@ -13,7 +14,28 @@ import (
 	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"gopkg.in/yaml.v3"
 )
+
+//go:embed resources.yaml
+var resourcesYAML []byte
+
+// serviceConfig defines the minimal, local structs for unmarshaling resources.yaml.
+type serviceConfig struct {
+	Topics []struct {
+		Name string `yaml:"name"`
+	} `yaml:"topics"`
+	Subscriptions []struct {
+		Name string `yaml:"name"`
+	} `yaml:"subscriptions"`
+	FirestoreDatabases []struct {
+		Name string `yaml:"name"`
+	} `yaml:"firestore_databases"`
+	FirestoreCollections []struct {
+		Name     string `yaml:"name"`
+		Database string `yaml:"database"`
+	} `yaml:"firestore_databases"`
+}
 
 // DeviceInfo is the data structure we want to enrich our messages with.
 type DeviceInfo struct {
@@ -49,6 +71,24 @@ func main() {
 	zerolog.SetGlobalLevel(zerolog.InfoLevel)
 	ctx := context.Background()
 
+	// --- 1. Load Resource Configuration from Embedded YAML ---
+	var resourceCfg serviceConfig
+	if err := yaml.Unmarshal(resourcesYAML, &resourceCfg); err != nil {
+		logger.Fatal().Err(err).Msg("Failed to parse embedded resources.yaml")
+	}
+	if len(resourceCfg.Subscriptions) != 1 {
+		logger.Fatal().Msgf("Config error: expected 1 subscription, found %d", len(resourceCfg.Subscriptions))
+	}
+	if len(resourceCfg.Topics) != 1 {
+		logger.Fatal().Msgf("Config error: expected 1 topic, found %d", len(resourceCfg.Topics))
+	}
+	if len(resourceCfg.FirestoreDatabases) != 1 {
+		logger.Fatal().Msgf("Config error: expected 1 firestore database, found %d", len(resourceCfg.FirestoreDatabases))
+	}
+	if len(resourceCfg.FirestoreCollections) != 1 {
+		logger.Fatal().Msgf("Config error: expected 1 firestore collections, found %d", len(resourceCfg.FirestoreDatabases))
+	}
+
 	projectID := os.Getenv("GOOGLE_CLOUD_PROJECT")
 	if projectID == "" {
 		logger.Fatal().Msg("GOOGLE_CLOUD_PROJECT environment variable must be set")
@@ -59,18 +99,16 @@ func main() {
 	if port := os.Getenv("PORT"); port != "" {
 		cfg.HTTPPort = ":" + port
 	}
-	if subID := os.Getenv("INPUT_SUBSCRIPTION_ID"); subID != "" {
-		cfg.InputSubscriptionID = subID
-	}
-	if topicID := os.Getenv("OUTPUT_TOPIC_ID"); topicID != "" {
-		cfg.OutputTopicID = topicID
-	}
-	if redisAddr := os.Getenv("REDIS_ADDR"); redisAddr != "" {
-		cfg.CacheConfig.RedisConfig.Addr = redisAddr
-	}
-	if fsCollection := os.Getenv("FIRESTORE_COLLECTION"); fsCollection != "" {
-		cfg.CacheConfig.FirestoreConfig.CollectionName = fsCollection
-	}
+	cfg.InputSubscriptionID = resourceCfg.Subscriptions[0].Name
+	cfg.OutputTopicID = resourceCfg.Topics[0].Name
+	// Note: The Firestore client only needs the projectID, but this confirms the link.
+	_ = resourceCfg.FirestoreDatabases[0].Name
+	cfg.CacheConfig.FirestoreConfig.CollectionName = resourceCfg.FirestoreCollections[0].Name
+
+	// Override Redis defaults with env vars
+	//if redisAddr := os.Getenv("REDIS_ADDR"); redisAddr != "" {
+	//	cfg.CacheConfig.RedisConfig.Addr = redisAddr
+	//}
 
 	logger.Info().Str("project_id", cfg.ProjectID).Msg("Preparing to start Enrichment Service")
 
@@ -90,10 +128,10 @@ func main() {
 		logger.Fatal().Err(err).Msg("Failed to create Firestore fetcher")
 	}
 
-	redisFetcher, err := cache.NewRedisCache[string, DeviceInfo](ctx, &cfg.CacheConfig.RedisConfig, logger, firestoreFetcher)
-	if err != nil {
-		logger.Fatal().Err(err).Msg("Failed to create Redis fetcher")
-	}
+	//redisFetcher, err := cache.NewRedisCache[string, DeviceInfo](ctx, &cfg.CacheConfig.RedisConfig, logger, firestoreFetcher)
+	//if err != nil {
+	//	logger.Fatal().Err(err).Msg("Failed to create Redis fetcher")
+	//}
 
 	cloudRunPort := os.Getenv("PORT")
 	if cloudRunPort != "" {
@@ -101,7 +139,7 @@ func main() {
 	}
 
 	// 3. Create the service wrapper, injecting the fetcher and the enricher.
-	enrichmentService, err := enrich.NewEnrichmentServiceWrapper[string, DeviceInfo](ctx, cfg, logger, redisFetcher, BasicKeyExtractor, DeviceApplier)
+	enrichmentService, err := enrich.NewEnrichmentServiceWrapper[string, DeviceInfo](ctx, cfg, logger, firestoreFetcher, BasicKeyExtractor, DeviceApplier)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to create Enrichment Service")
 	}

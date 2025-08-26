@@ -8,12 +8,10 @@
 package e2e
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
-	"net/http"
 	"os"
 	"strconv"
 	"testing"
@@ -21,7 +19,7 @@ import (
 
 	"cloud.google.com/go/bigquery"
 	"cloud.google.com/go/firestore"
-	"cloud.google.com/go/pubsub"
+	"cloud.google.com/go/pubsub/v2"
 	"cloud.google.com/go/storage"
 	"github.com/google/uuid"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
@@ -155,30 +153,20 @@ func TestEnrichmentBigQueryIceStoreE2E(t *testing.T) {
 		directorService.Shutdown(shutdownCtx)
 	})
 
-	// REFACTOR: Use a context-aware HTTP request to prevent hangs.
-	setupURL := directorURL + "/dataflow/setup"
-	req, err := http.NewRequestWithContext(totalTestContext, http.MethodPost, setupURL, bytes.NewBuffer([]byte{}))
+	err = directorService.SetupFoundationalDataflow(totalTestContext, dataflowName)
 	require.NoError(t, err)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	_ = resp.Body.Close()
 
 	t.Cleanup(func() {
 		if *keepResources && !t.Failed() {
 			logger.Info().Msg("Test passed and -keep-resources flag is set. Cloud resources will be KEPT for inspection.")
 			return
 		}
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cleanupCancel()
-		logger.Info().Msg("Requesting resource teardown from ServiceDirector...")
-		teardownURL := directorURL + "/orchestrate/teardown"
-		req, _ := http.NewRequestWithContext(cleanupCtx, http.MethodPost, teardownURL, nil)
-		_, _ = http.DefaultClient.Do(req)
 
-		// Fallback direct cleanup.
-		_ = bqClient.Dataset(uniqueDatasetID).DeleteWithContents(cleanupCtx)
+		// REFACTOR: The bucket must be emptied *before* we ask the ServiceManager to delete it.
+		// This resolves the "bucket not empty" error.
+		logger.Info().Str("bucket", uniqueBucketName).Msg("Cleanup: Forcefully emptying GCS bucket before teardown...")
 		bucket := gcsClient.Bucket(uniqueBucketName)
 		it := bucket.Objects(cleanupCtx, nil)
 		for {
@@ -186,14 +174,19 @@ func TestEnrichmentBigQueryIceStoreE2E(t *testing.T) {
 			if errors.Is(err, iterator.Done) {
 				break
 			}
-			if err == nil {
-				// REFACTOR: Log errors during cleanup instead of ignoring them.
-				if delErr := bucket.Object(attrs.Name).Delete(cleanupCtx); delErr != nil {
-					logger.Warn().Err(delErr).Str("object", attrs.Name).Msg("Failed to delete GCS object during cleanup.")
-				}
+			// If we get an error listing objects, we should fail the cleanup.
+			require.NoError(t, err, "failed to list objects during cleanup")
+
+			if delErr := bucket.Object(attrs.Name).Delete(cleanupCtx); delErr != nil {
+				// We can log this error but continue, as the final bucket delete will likely fail and provide a clearer error.
+				logger.Warn().Err(delErr).Str("object", attrs.Name).Msg("Failed to delete GCS object during cleanup.")
 			}
 		}
-		_ = bucket.Delete(cleanupCtx)
+		logger.Info().Str("bucket", uniqueBucketName).Msg("Cleanup: GCS bucket emptied.")
+
+		// Now that the bucket is empty, the general teardown can proceed.
+		err = directorService.TeardownDataflow(cleanupCtx, dataflowName)
+		require.NoError(t, err)
 	})
 
 	cfg := ingestion.LoadConfigDefaults(projectID)

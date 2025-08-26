@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	_ "embed" // Required for go:embed
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,7 +13,25 @@ import (
 	"github.com/illmade-knight/go-dataflow-services/pkg/bigqueries"
 	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
 	"github.com/rs/zerolog"
+	"gopkg.in/yaml.v3"
 )
+
+//go:embed resources.yaml
+var resourcesYAML []byte
+
+// serviceConfig defines the minimal, local structs needed to unmarshal the
+// service-specific resources.yaml file.
+type serviceConfig struct {
+	Subscriptions []struct {
+		Name string `yaml:"name"`
+	} `yaml:"subscriptions"`
+	BigQueryDatasets []struct {
+		Name string `yaml:"name"`
+	} `yaml:"bigquery_datasets"`
+	BigQueryTables []struct {
+		Name string `yaml:"name"`
+	} `yaml:"bigquery_tables"`
+}
 
 // EnrichedPayload defines the structure of the data we expect to receive
 // from the enrichment service and insert into BigQuery.
@@ -66,7 +85,22 @@ func main() {
 	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
 	ctx := context.Background()
 
-	// --- Configuration Loading ---
+	// --- 1. Load Resource Configuration from Embedded YAML ---
+	var resourceCfg serviceConfig
+	if err := yaml.Unmarshal(resourcesYAML, &resourceCfg); err != nil {
+		logger.Fatal().Err(err).Msg("Failed to parse embedded resources.yaml")
+	}
+	if len(resourceCfg.Subscriptions) != 1 {
+		logger.Fatal().Msgf("Configuration error: expected exactly 1 subscription, found %d", len(resourceCfg.Subscriptions))
+	}
+	if len(resourceCfg.BigQueryDatasets) != 1 {
+		logger.Fatal().Msgf("Configuration error: expected exactly 1 BigQuery dataset, found %d", len(resourceCfg.BigQueryDatasets))
+	}
+	if len(resourceCfg.BigQueryTables) != 1 {
+		logger.Fatal().Msgf("Configuration error: expected exactly 1 BigQuery table, found %d", len(resourceCfg.BigQueryTables))
+	}
+
+	// --- 2. Load Runtime Configuration from Environment ---
 	projectID := os.Getenv("PROJECT_ID")
 	if projectID == "" {
 		logger.Fatal().Msg("PROJECT_ID environment variable not set")
@@ -91,30 +125,15 @@ func main() {
 	}
 	cfg.ServiceName = serviceName
 
-	subID := os.Getenv("BQ_INGESTION_SUB_ID")
-	if subID == "" {
-		logger.Fatal().Msg("Input subscription ID not specified")
-	}
-	cfg.InputSubscriptionID = subID
-
-	dataset := os.Getenv("BIGQUERY_DATASET")
-	if dataset == "" {
-		logger.Fatal().Msg("BigQuery dataset not specified")
-	}
-	cfg.BigQueryConfig.DatasetID = dataset
-
-	table := os.Getenv("BIGQUERY_TABLE")
-	if table == "" {
-		logger.Fatal().Msg("BigQuery table not specified")
-	}
-	cfg.BigQueryConfig.TableID = table
-
-	cloudRunPort := os.Getenv("PORT")
-	if cloudRunPort != "" {
+	if cloudRunPort := os.Getenv("PORT"); cloudRunPort != "" {
 		cfg.HTTPPort = cloudRunPort
 	}
 
-	// --- Service Initialization ---
+	// --- 3. Set Resource Names from Embedded YAML ---
+	cfg.InputSubscriptionID = resourceCfg.Subscriptions[0].Name
+	cfg.BigQueryConfig.DatasetID = resourceCfg.BigQueryDatasets[0].Name
+	cfg.BigQueryConfig.TableID = resourceCfg.BigQueryTables[0].Name
+
 	logger.Info().
 		Str("project_id", cfg.ProjectID).
 		Str("subscription_id", cfg.InputSubscriptionID).
@@ -122,12 +141,12 @@ func main() {
 		Str("bigquery_table", cfg.BigQueryConfig.TableID).
 		Msg("Preparing to start BigQuery service")
 
+	// --- 4. Service Initialization ---
 	bqService, err := bigqueries.NewBQServiceWrapper[EnrichedPayload](ctx, cfg, logger, enrichedMessageTransformer)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Failed to create BigQuery Service")
 	}
 
-	// EDITED: The main logic is now cleaner and correctly handles the blocking Start method.
 	go func() {
 		logger.Info().Str("port", bqService.GetHTTPPort()).Msg("BigQuery Service starting...")
 		if err := bqService.Start(ctx); err != nil {
@@ -135,12 +154,11 @@ func main() {
 		}
 	}()
 
-	// Wait for a shutdown signal. This now correctly blocks the main function.
+	// --- 5. Graceful Shutdown ---
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	// --- Graceful Shutdown ---
 	logger.Info().Msg("Shutdown signal received, stopping BigQuery Service...")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

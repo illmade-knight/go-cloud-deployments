@@ -6,12 +6,9 @@
 package e2e
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"strconv"
 	"testing"
@@ -19,7 +16,6 @@ import (
 
 	"cloud.google.com/go/bigquery"
 	"github.com/google/uuid"
-	"github.com/illmade-knight/go-cloud-manager/microservice/servicedirector"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/illmade-knight/go-dataflow-services/pkg/ingestion"
 	"github.com/illmade-knight/go-test/auth"
@@ -122,14 +118,8 @@ func TestFullDataflowE2E(t *testing.T) {
 	timings["ServiceStartup(Director)"] = time.Since(start).String()
 
 	start = time.Now()
-	setupURL := directorURL + "/dataflow/setup"
-	dataflowRequest := servicedirector.OrchestrateRequest{DataflowName: "all"}
-	body, err := json.Marshal(dataflowRequest)
+	err = directorService.SetupFoundationalDataflow(totalTestContext, dataflowName)
 	require.NoError(t, err)
-	resp, err := http.Post(setupURL, "application/json", bytes.NewBuffer(body))
-	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, resp.StatusCode, "Director setup call should succeed")
-	require.NoError(t, resp.Body.Close())
 	timings["CloudResourceSetup(Director)"] = time.Since(start).String()
 
 	t.Cleanup(func() {
@@ -138,9 +128,7 @@ func TestFullDataflowE2E(t *testing.T) {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cleanupCancel()
 
-		teardownURL := directorURL + "/orchestrate/teardown"
-		req, _ := http.NewRequestWithContext(cleanupCtx, http.MethodPost, teardownURL, nil)
-		_, err = http.DefaultClient.Do(req)
+		err = directorService.TeardownDataflow(cleanupCtx, dataflowName)
 		if err != nil {
 			logger.Warn().Err(err).Msg("cleanup call failed")
 		}

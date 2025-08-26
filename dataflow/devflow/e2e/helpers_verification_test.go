@@ -17,7 +17,7 @@ import (
 	"time"
 
 	bq "cloud.google.com/go/bigquery"
-	"cloud.google.com/go/pubsub"
+	"cloud.google.com/go/pubsub/v2"
 	"cloud.google.com/go/storage"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -37,7 +37,7 @@ func verifyPubSubMessages(
 	t *testing.T,
 	logger zerolog.Logger,
 	ctx context.Context,
-	sub *pubsub.Subscription,
+	sub *pubsub.Subscriber,
 	expectedCountCh <-chan int,
 	validator MessageValidationFunc,
 ) int {

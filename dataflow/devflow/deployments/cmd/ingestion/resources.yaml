@@ -1,0 +1,4 @@
+topics:
+    - name: ingestion-bq
+      producer_service:
+        name: ingestion-service

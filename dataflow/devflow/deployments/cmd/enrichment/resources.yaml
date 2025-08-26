@@ -1,0 +1,27 @@
+topics:
+    - name: enrichment-out
+      producer_service:
+        name: enrichment-service
+        env: ""
+subscriptions:
+    - name: bq-ingestion
+      topic: ingestion-bq
+      consumer_service:
+        name: enrichment-service
+        env: ""
+bigquery_datasets: []
+bigquery_tables: []
+gcs_buckets: []
+firestore_databases:
+    - name: (default)
+      location_id: ""
+      type: ""
+      consumers:
+        - name: enrichment-service
+          env: ""
+firestore_collections:
+    - name: devices
+      consumers:
+        - name: enrichment-service
+          env: ""
+      database: (default)

@@ -1,0 +1,93 @@
+- source: ServiceDirector
+  binding:
+    serviceaccount: servicedirector-ice-sa
+    resourcetype: project
+    resourceid: gemini-power-test
+    role: roles/pubsub.admin
+  reason: Administrative role required by the ServiceDirector to manage dataflow resources.
+- source: ServiceDirector
+  binding:
+    serviceaccount: servicedirector-ice-sa
+    resourcetype: project
+    resourceid: gemini-power-test
+    role: roles/datastore.owner
+  reason: Administrative role required by the ServiceDirector to manage dataflow resources.
+- source: ServiceDirector
+  binding:
+    serviceaccount: servicedirector-ice-sa
+    resourcetype: project
+    resourceid: gemini-power-test
+    role: roles/iam.serviceAccountAdmin
+  reason: Administrative role required by the ServiceDirector to manage dataflow resources.
+- source: ServiceDirector
+  binding:
+    serviceaccount: servicedirector-ice-sa
+    resourcetype: project
+    resourceid: gemini-power-test
+    role: roles/secretmanager.admin
+  reason: Administrative role required by the ServiceDirector to manage dataflow resources.
+- source: ServiceDirector
+  binding:
+    serviceaccount: servicedirector-ice-sa
+    resourcetype: project
+    resourceid: gemini-power-test
+    role: roles/run.admin
+  reason: Administrative role required by the ServiceDirector to manage dataflow resources.
+- source: ApplicationService
+  binding:
+    serviceaccount: ingestion-sa
+    resourcetype: pubsub_topic
+    resourceid: ingestion-bq
+    role: roles/pubsub.publisher
+  reason: Needed because of the service-to-resource link defined in services.yaml for 'ingestion-sa'.
+- source: ApplicationService
+  binding:
+    serviceaccount: ingestion-sa
+    resourcetype: pubsub_topic
+    resourceid: ingestion-bq
+    role: roles/pubsub.viewer
+  reason: Needed because of the service-to-resource link defined in services.yaml for 'ingestion-sa'.
+- source: ApplicationService
+  binding:
+    serviceaccount: enrichment-sa
+    resourcetype: pubsub_subscription
+    resourceid: bq-ingestion
+    role: roles/pubsub.subscriber
+  reason: Needed because of the service-to-resource link defined in services.yaml for 'enrichment-sa'.
+- source: ApplicationService
+  binding:
+    serviceaccount: enrichment-sa
+    resourcetype: pubsub_subscription
+    resourceid: bq-ingestion
+    role: roles/pubsub.viewer
+  reason: Needed because of the service-to-resource link defined in services.yaml for 'enrichment-sa'.
+- source: ApplicationService
+  binding:
+    serviceaccount: enrichment-sa
+    resourcetype: pubsub_topic
+    resourceid: ingestion-bq
+    role: roles/pubsub.viewer
+  reason: Needed because of the service-to-resource link defined in services.yaml for 'enrichment-sa'.
+- source: ApplicationService
+  binding:
+    serviceaccount: ingestion-sa
+    resourcetype: cloudrun_service
+    resourceid: servicedirector-enrichment-flow
+    role: roles/run.invoker
+    resourcelocation: europe-west2
+  reason: Needed because of the service-to-resource link defined in services.yaml for 'ingestion-sa'.
+- source: ApplicationService
+  binding:
+    serviceaccount: ingestion-sa
+    resourcetype: secret
+    resourceid: SERVICE_PASS
+    role: roles/secretmanager.secretAccessor
+  reason: Needed because of the service-to-resource link defined in services.yaml for 'ingestion-sa'.
+- source: ApplicationService
+  binding:
+    serviceaccount: enrichment-sa
+    resourcetype: cloudrun_service
+    resourceid: servicedirector-enrichment-flow
+    role: roles/run.invoker
+    resourcelocation: europe-west2
+  reason: Needed because of the service-to-resource link defined in services.yaml for 'enrichment-sa'.

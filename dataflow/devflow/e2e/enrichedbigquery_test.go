@@ -6,11 +6,9 @@
 package e2e
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"strconv"
 	"testing"
@@ -18,7 +16,7 @@ import (
 
 	"cloud.google.com/go/bigquery"
 	"cloud.google.com/go/firestore"
-	"cloud.google.com/go/pubsub"
+	"cloud.google.com/go/pubsub/v2"
 	"github.com/google/uuid"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/illmade-knight/go-dataflow-services/pkg/enrich"
@@ -152,20 +150,20 @@ func TestEnrichmentToBigQueryE2E(t *testing.T) {
 	timings["ServiceStartup(Director)"] = time.Since(start).String()
 
 	start = time.Now()
-	setupURL := directorURL + "/dataflow/setup"
-	resp, err := http.Post(setupURL, "application/json", bytes.NewBuffer([]byte{}))
+	err = directorService.SetupFoundationalDataflow(totalTestContext, dataflowName)
 	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	_ = resp.Body.Close()
 	timings["CloudResourceSetup(Director)"] = time.Since(start).String()
 
 	t.Cleanup(func() {
 		teardownStart := time.Now()
 		teardownCtx, teardownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer teardownCancel()
-		teardownURL := directorURL + "/orchestrate/teardown"
-		req, _ := http.NewRequestWithContext(teardownCtx, http.MethodPost, teardownURL, nil)
-		_, _ = http.DefaultClient.Do(req)
+
+		err = directorService.TeardownDataflow(totalTestContext, dataflowName)
+		if err != nil {
+			logger.Warn().Msg("did not fully teardown dataflow")
+		}
+
 		ds := bqClient.Dataset(uniqueDatasetID)
 		if err := ds.DeleteWithContents(teardownCtx); err != nil {
 			logger.Warn().Err(err).Str("dataset", uniqueDatasetID).Msg("Failed to delete BigQuery dataset during cleanup.")

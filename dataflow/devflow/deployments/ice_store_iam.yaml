@@ -1,0 +1,112 @@
+- source: ServiceDirector
+  binding:
+    serviceaccount: servicedirector-ice-sa
+    resourcetype: project
+    resourceid: gemini-power-test
+    role: roles/run.admin
+    resourcelocation: ""
+  reason: Administrative role required by the ServiceDirector to manage dataflow resources.
+- source: ServiceDirector
+  binding:
+    serviceaccount: servicedirector-ice-sa
+    resourcetype: project
+    resourceid: gemini-power-test
+    role: roles/pubsub.admin
+    resourcelocation: ""
+  reason: Administrative role required by the ServiceDirector to manage dataflow resources.
+- source: ServiceDirector
+  binding:
+    serviceaccount: servicedirector-ice-sa
+    resourcetype: project
+    resourceid: gemini-power-test
+    role: roles/storage.admin
+    resourcelocation: ""
+  reason: Administrative role required by the ServiceDirector to manage dataflow resources.
+- source: ServiceDirector
+  binding:
+    serviceaccount: servicedirector-ice-sa
+    resourcetype: project
+    resourceid: gemini-power-test
+    role: roles/iam.serviceAccountAdmin
+    resourcelocation: ""
+  reason: Administrative role required by the ServiceDirector to manage dataflow resources.
+- source: ServiceDirector
+  binding:
+    serviceaccount: servicedirector-ice-sa
+    resourcetype: project
+    resourceid: gemini-power-test
+    role: roles/secretmanager.admin
+    resourcelocation: ""
+  reason: Administrative role required by the ServiceDirector to manage dataflow resources.
+- source: ApplicationService
+  binding:
+    serviceaccount: ingestion-sa
+    resourcetype: pubsub_topic
+    resourceid: ingestion-bq
+    role: roles/pubsub.publisher
+    resourcelocation: ""
+  reason: Needed because of the service-to-resource link defined in services.yaml for 'ingestion-sa'.
+- source: ApplicationService
+  binding:
+    serviceaccount: ingestion-sa
+    resourcetype: pubsub_topic
+    resourceid: ingestion-bq
+    role: roles/pubsub.viewer
+    resourcelocation: ""
+  reason: Needed because of the service-to-resource link defined in services.yaml for 'ingestion-sa'.
+- source: ApplicationService
+  binding:
+    serviceaccount: icestore-sa
+    resourcetype: pubsub_subscription
+    resourceid: bq-ingestion
+    role: roles/pubsub.subscriber
+    resourcelocation: ""
+  reason: Needed because of the service-to-resource link defined in services.yaml for 'icestore-sa'.
+- source: ApplicationService
+  binding:
+    serviceaccount: icestore-sa
+    resourcetype: pubsub_subscription
+    resourceid: bq-ingestion
+    role: roles/pubsub.viewer
+    resourcelocation: ""
+  reason: Needed because of the service-to-resource link defined in services.yaml for 'icestore-sa'.
+- source: ApplicationService
+  binding:
+    serviceaccount: icestore-sa
+    resourcetype: pubsub_topic
+    resourceid: ingestion-bq
+    role: roles/pubsub.viewer
+    resourcelocation: ""
+  reason: Needed because of the service-to-resource link defined in services.yaml for 'icestore-sa'.
+- source: ApplicationService
+  binding:
+    serviceaccount: icestore-sa
+    resourcetype: gcs_bucket
+    resourceid: iot_data_bk
+    role: roles/storage.objectAdmin
+    resourcelocation: ""
+  reason: Needed because of the service-to-resource link defined in services.yaml for 'icestore-sa'.
+- source: ApplicationService
+  binding:
+    serviceaccount: ingestion-sa
+    resourcetype: cloudrun_service
+    resourceid: servicedirector-ice-flow
+    role: roles/run.invoker
+    resourcelocation: europe-west2
+  reason: Needed because of the service-to-resource link defined in services.yaml for 'ingestion-sa'.
+- source: ApplicationService
+  binding:
+    serviceaccount: ingestion-sa
+    resourcetype: secret
+    resourceid: SERVICE_PASS
+    role: roles/secretmanager.secretAccessor
+    resourcelocation: ""
+  reason: Needed because of the service-to-resource link defined in services.yaml for 'ingestion-sa'.
+- source: ApplicationService
+  binding:
+    serviceaccount: icestore-sa
+    resourcetype: cloudrun_service
+    resourceid: servicedirector-ice-flow
+    role: roles/run.invoker
+    resourcelocation: europe-west2
+  reason: Needed because of the service-to-resource link defined in services.yaml for 'icestore-sa'.

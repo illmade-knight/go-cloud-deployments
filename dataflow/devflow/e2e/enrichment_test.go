@@ -6,18 +6,16 @@
 package e2e
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"strconv"
 	"testing"
 	"time"
 
 	"cloud.google.com/go/firestore"
-	"cloud.google.com/go/pubsub"
+	"cloud.google.com/go/pubsub/v2"
 	"github.com/google/uuid"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/illmade-knight/go-dataflow-services/pkg/enrich"
@@ -72,6 +70,8 @@ func TestEnrichmentE2E(t *testing.T) {
 	enrichmentSubID := fmt.Sprintf("enrich-sub-%s", runID)
 	enrichedTopicID := fmt.Sprintf("enrich-output-topic-%s", runID)
 	verifierSubID := fmt.Sprintf("verifier-sub-%s", runID)
+	//enrichmentService := fmt.Sprintf("enrichment-service-%s", runID)
+	firestoreDatabase := fmt.Sprintf("devices-%s", runID)
 	firestoreCollection := fmt.Sprintf("devices-e2e-%s", runID)
 	logger.Info().Str("run_id", runID).Msg("Generated unique resources for test run")
 
@@ -92,6 +92,11 @@ func TestEnrichmentE2E(t *testing.T) {
 					Subscriptions: []servicemanager.SubscriptionConfig{
 						{CloudResource: servicemanager.CloudResource{Name: enrichmentSubID}, Topic: ingestionTopicID},
 						{CloudResource: servicemanager.CloudResource{Name: verifierSubID}, Topic: enrichedTopicID},
+					},
+					FirestoreDatabases: []servicemanager.FirestoreDatabase{
+						{
+							CloudResource: servicemanager.CloudResource{Name: firestoreDatabase},
+						},
 					},
 				},
 			},
@@ -135,27 +140,21 @@ func TestEnrichmentE2E(t *testing.T) {
 	timings["ServiceStartup(Director)"] = time.Since(start).String()
 
 	start = time.Now()
-	setupURL := directorURL + "/dataflow/setup"
-	resp, err := http.Post(setupURL, "application/json", bytes.NewBuffer([]byte{}))
+	err = directorService.SetupFoundationalDataflow(totalTestContext, dataflowName)
 	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	_ = resp.Body.Close()
 	timings["CloudResourceSetup(Director)"] = time.Since(start).String()
 
 	t.Cleanup(func() {
 		teardownStart := time.Now()
 		teardownCtx, teardownCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer teardownCancel()
-		teardownURL := directorURL + "/orchestrate/teardown"
-		req, _ := http.NewRequestWithContext(teardownCtx, http.MethodPost, teardownURL, nil)
-		_, _ = http.DefaultClient.Do(req)
+		err = directorService.TeardownDataflow(teardownCtx, dataflowName)
+		require.NoError(t, err)
 		timings["CloudResourceTeardown(Director)"] = time.Since(teardownStart).String()
 	})
 
-	verifierSub := psClient.Subscription(verifierSubID)
-	ok, err := verifierSub.Exists(totalTestContext)
-	require.NoError(t, err)
-	require.True(t, ok, "verifier subscription should exist after director setup")
+	qualifiedSubName := fmt.Sprintf("projects/%s/subscriptions/%s", projectID, verifierSubID)
+	verifierSub := psClient.Subscriber(qualifiedSubName)
 
 	start = time.Now()
 	cfg := ingestion.LoadConfigDefaults(projectID)

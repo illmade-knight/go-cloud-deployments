@@ -1,0 +1,16 @@
+subscriptions:
+    - name: bq-ingestion
+      topic: ingestion-bq
+      consumer_service:
+        name: bigquery-service
+bigquery_datasets:
+    - name: iot_data_bq
+bigquery_tables:
+    - name: ingested_payloads_bq
+      producers:
+        - name: bigquery-service
+      dataset: iot_data_bq
+      schema_type: github.com/illmade-knight/go-dataflow-service/dataflow/devflow/EnrichedTestPayload
+      schema_import_path: ""
+      clustering_fields:
+        - device_id

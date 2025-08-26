@@ -7,7 +7,7 @@ service_manager_spec:
     deployment:
         source_path: .
         buildable_module_path: cmd/bq-servicedirector
-        image: europe-west2-docker.pkg.dev/gemini-power-test/cloud-deploy/servicedirector-bq-flow:eab79ffa
+        image: europe-west2-docker.pkg.dev/gemini-power-test/cloud-deploy/servicedirector-bq-flow:da4e32e7
         image_repo: cloud-deploy
         service_url: ""
         region: europe-west2
@@ -17,13 +17,19 @@ service_manager_spec:
         environment_vars:
             DATAFLOW_NAME: conductor
             PROJECT_ID: gemini-power-test
-            SD_COMMAND_SUBSCRIPTION: director-command-sub-bq
-            SD_COMMAND_TOPIC: director-commands-bq
-            SD_COMPLETION_TOPIC: director-events-bq
             SERVICE_NAME: servicedirector-bq-flow
+    command_topic:
+        name: command-topic
+        lookup:
+            key: command-subscription-id
+            method: yaml
+    completion_topic:
+        name: completion-topic
+        lookup:
+            key: completion-topic-id
+            method: yaml
 dataflows:
     bigquery-flow:
-        name: ""
         services:
             bigquery-service:
                 name: bigquery-service
@@ -31,7 +37,7 @@ dataflows:
                 deployment:
                     source_path: .
                     buildable_module_path: cmd/bigquery
-                    image: europe-west2-docker.pkg.dev/gemini-power-test/cloud-deploy/bigquery-service:84e80499
+                    image: europe-west2-docker.pkg.dev/gemini-power-test/cloud-deploy/bigquery-service:94680e0b
                     image_repo: cloud-deploy
                     service_url: ""
                     region: europe-west2
@@ -39,11 +45,7 @@ dataflows:
                     cpu: "1"
                     memory: 512Mi
                     environment_vars:
-                        BIGQUERY_DATASET: iot_data_bq
-                        BIGQUERY_TABLE: ingested_payloads_bq
-                        BQ_INGESTION_SUB_ID: bq-ingestion
                         DATAFLOW_NAME: bigquery-flow
-                        INGESTED_PAYLOADS_BQ_WRITE_TABLE: ingested_payloads_bq
                         PROJECT_ID: gemini-power-test
                         SERVICE_NAME: bigquery-service
                 dependencies:
@@ -54,7 +56,7 @@ dataflows:
                 deployment:
                     source_path: .
                     buildable_module_path: cmd/ingestion
-                    image: europe-west2-docker.pkg.dev/gemini-power-test/cloud-deploy/ingestion-service:edc140f0
+                    image: europe-west2-docker.pkg.dev/gemini-power-test/cloud-deploy/ingestion-service:15872712
                     image_repo: cloud-deploy
                     service_url: ""
                     region: europe-west2
@@ -63,7 +65,6 @@ dataflows:
                     memory: 512Mi
                     environment_vars:
                         DATAFLOW_NAME: bigquery-flow
-                        INGESTION_BQ_TOPIC_ID: ingestion-bq
                         MQTT_BROKER_URL: tcp://10.154.0.5:1883
                         MQTT_CLIENT_ID: test-client-devflow
                         MQTT_TOPIC: devices/+/data
@@ -80,24 +81,42 @@ dataflows:
                 - name: ingestion-bq
                   producer_service:
                     name: ingestion-service
-                    env: ""
             subscriptions:
                 - name: bq-ingestion
                   topic: ingestion-bq
                   consumer_service:
                     name: bigquery-service
-                    env: ""
             bigquery_datasets:
                 - name: iot_data_bq
             bigquery_tables:
                 - name: ingested_payloads_bq
                   producers:
                     - name: bigquery-service
-                      env: ""
                   dataset: iot_data_bq
                   schema_type: github.com/illmade-knight/go-dataflow-service/dataflow/devflow/EnrichedTestPayload
                   schema_import_path: ""
                   clustering_fields:
                     - device_id
-            gcs_buckets: []
+    servicedirector-bq-flow-infra:
+        name: servicedirector-bq-flow-infra
+        description: Auto-generated infrastructure resources for the ServiceDirector (servicedirector-bq-flow).
+        resources:
+            topics:
+                - name: command-topic
+                - name: completion-topic
+                  producer_service:
+                    name: servicedirector-bq-flow
+                    lookup:
+                        key: completion-topic-id
+                        method: yaml
+            subscriptions:
+                - name: command-topic-sub
+                  topic: command-topic
+                  consumer_service:
+                    name: servicedirector-bq-flow
+                    lookup:
+                        key: command-subscription-id
+                        method: yaml
+        lifecycle:
+            strategy: permanent
 deployment_environments: {}

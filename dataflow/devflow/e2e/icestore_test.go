@@ -6,11 +6,9 @@
 package e2e
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"strconv"
 	"testing"
@@ -119,11 +117,8 @@ func TestIceStoreDataflowE2E(t *testing.T) {
 	timings["ServiceStartup(Director)"] = time.Since(start).String()
 
 	start = time.Now()
-	setupURL := directorURL + "/dataflow/setup"
-	resp, err := http.Post(setupURL, "application/json", bytes.NewBuffer([]byte{}))
+	err = directorService.SetupFoundationalDataflow(totalTestContext, dataflowName)
 	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	_ = resp.Body.Close()
 	timings["CloudResourceSetup(Director)"] = time.Since(start).String()
 
 	t.Cleanup(func() {
@@ -132,9 +127,7 @@ func TestIceStoreDataflowE2E(t *testing.T) {
 		defer cleanupCancel()
 
 		logger.Info().Msg("Requesting resource teardown from ServiceDirector...")
-		teardownURL := directorURL + "/orchestrate/teardown"
-		req, _ := http.NewRequestWithContext(cleanupCtx, http.MethodPost, teardownURL, nil)
-		_, err = http.DefaultClient.Do(req)
+		err = directorService.TeardownDataflow(cleanupCtx, dataflowName)
 		if err != nil {
 			logger.Warn().Err(err).Msg("Teardown call to director failed")
 		}
@@ -167,6 +160,7 @@ func TestIceStoreDataflowE2E(t *testing.T) {
 	cfg.DataflowName = dataflowName
 	cfg.ServiceDirectorURL = directorURL
 	cfg.MQTT.BrokerURL = mqttConnInfo.EmulatorAddress
+	cfg.MQTT.Topic = "devices/+/data"
 	cfg.OutputTopicID = ingestionOutputTopicID
 	ingestionLogger := logger.With().Str("service", "ingestion").Logger()
 	ingestionSvc := startIngestionService(t, totalTestContext, ingestionLogger, cfg)

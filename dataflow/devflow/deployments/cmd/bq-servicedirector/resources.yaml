@@ -1,0 +1,15 @@
+topics:
+    - name: completion-topic
+      producer_service:
+        name: servicedirector-bq-flow
+        lookup:
+            key: completion-topic-id
+            method: yaml
+subscriptions:
+    - name: command-topic-sub
+      topic: command-topic
+      consumer_service:
+        name: servicedirector-bq-flow
+        lookup:
+            key: command-subscription-id
+            method: yaml

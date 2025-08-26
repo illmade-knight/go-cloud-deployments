@@ -31,7 +31,7 @@ func main() {
 	flag.Parse()
 
 	if *projectID == "" {
-		log.Fatal().Msg("Missing required flag: -project-id.")
+		logger.Fatal().Msg("Missing required flag: -project-id.")
 	}
 
 	// --- 2. Load and configure the architecture ---
@@ -49,19 +49,18 @@ func main() {
 		logger.Fatal().Err(err).Msg("Failed to hydrate architecture")
 	}
 
-	// REFACTOR: Generate the configs and then immediately write them to disk.
-	log.Info().Msg("Generating and writing service-specific YAML configurations...")
+	log.Info().Msg("Generating service-specific YAML configurations...")
 	serviceConfigs, err := orchestration.GenerateServiceConfigs(&arch)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to generate service configs")
 	}
 
-	// This is the critical step that was missing.
+	// REFACTOR: This critical step writes the generated `resources.yaml` files
+	// to each service's source directory so they can be embedded and tested.
 	if err := orchestration.WriteServiceConfigFiles(serviceConfigs, logger); err != nil {
 		log.Fatal().Err(err).Msg("Failed to write service config files")
 	}
 
-	// Save the full hydrated `services.yaml` to the ServiceDirector source directory.
 	err = orchestration.PrepareServiceDirectorSource(&arch, log.Logger)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to prepare ServiceDirector source")
@@ -71,7 +70,7 @@ func main() {
 	// --- 4. Run either the deployment or teardown workflow ---
 	opts := orchestration.ConductorOptions{
 		CheckPrerequisites:      true,
-		PreflightServiceConfigs: true,
+		PreflightServiceConfigs: true, // REFACTOR: Enable the pre-build `go test` validation.
 		SetupIAM:                true,
 		BuildAndDeployServices:  true,
 		TriggerRemoteSetup:      true,
@@ -83,6 +82,20 @@ func main() {
 	conductor, err := orchestration.NewConductor(ctx, &arch, log.Logger, opts)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to create conductor")
+	}
+
+	// Note: The conductor.Run() method already includes a pre-flight check when the option is enabled.
+	// Calling it here separately is redundant but harmless.
+	preflight, cancel := context.WithTimeout(ctx, time.Minute)
+	err = conductor.Preflight(preflight)
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed preflight")
+	}
+	cancel()
+
+	err = conductor.GenerateIAMPlan("conductors/enrichment/ice_store_iam.yaml")
+	if err != nil {
+		log.Info().Err(err).Msg("could not generate iam plan")
 	}
 
 	if *teardown {

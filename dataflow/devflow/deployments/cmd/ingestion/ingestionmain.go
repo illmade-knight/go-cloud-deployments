@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	_ "embed" // Required for go:embed
 	"errors"
 	"net/http"
 	"os"
@@ -14,7 +15,19 @@ import (
 	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
 	"github.com/illmade-knight/go-dataflow/pkg/mqttconverter"
 	"github.com/rs/zerolog"
+	"gopkg.in/yaml.v3"
 )
+
+//go:embed resources.yaml
+var resourcesYAML []byte
+
+// serviceConfig defines the minimal, local structs needed to unmarshal the
+// service-specific resources.yaml file.
+type serviceConfig struct {
+	Topics []struct {
+		Name string `yaml:"name"`
+	} `yaml:"topics"`
+}
 
 var deviceFinder = regexp.MustCompile(`^[^/]+/([^/]+)/[^/]+$`)
 
@@ -40,12 +53,23 @@ func main() {
 	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
 	logger.Info().Msg("<<<<< Ingestion Service Main Starting >>>>>")
 
-	// --- Configuration Loading ---
+	// --- 1. Load Resource Configuration from Embedded YAML ---
+	var resourceCfg serviceConfig
+	if err := yaml.Unmarshal(resourcesYAML, &resourceCfg); err != nil {
+		logger.Fatal().Err(err).Msg("Failed to parse embedded resources.yaml")
+	}
+	if len(resourceCfg.Topics) != 1 {
+		logger.Fatal().Msgf("Configuration error: expected exactly 1 topic in resources.yaml, found %d", len(resourceCfg.Topics))
+	}
+	producerTopic := resourceCfg.Topics[0].Name
+
+	// --- 2. Load Runtime Configuration from Environment ---
 	projectID := os.Getenv("PROJECT_ID")
 	if projectID == "" {
 		logger.Fatal().Msg("PROJECT_ID environment variable not set")
 	}
 	cfg := ingestion.LoadConfigDefaults(projectID)
+	cfg.OutputTopicID = producerTopic // Set from YAML
 
 	serviceName := os.Getenv("SERVICE_NAME")
 	if serviceName == "" {
@@ -62,11 +86,6 @@ func main() {
 		logger.Fatal().Msg("ServiceDirector URL not specified")
 	}
 	cfg.ServiceDirectorURL = serviceDirectorURL
-	producerTopic := os.Getenv("INGESTION_BQ_TOPIC_ID")
-	if producerTopic == "" {
-		logger.Fatal().Msg("Producer Topic not specified")
-	}
-	cfg.OutputTopicID = producerTopic
 
 	brokerURL := os.Getenv("MQTT_BROKER_URL")
 	mqttTopic := os.Getenv("MQTT_TOPIC")
@@ -85,12 +104,11 @@ func main() {
 		Password:       mqttPassword,
 		ConnectTimeout: 30 * time.Second,
 	}
-	cloudRunPort := os.Getenv("PORT")
-	if cloudRunPort != "" {
+	if cloudRunPort := os.Getenv("PORT"); cloudRunPort != "" {
 		cfg.HTTPPort = cloudRunPort
 	}
 
-	// --- Service Initialization ---
+	// --- 3. Service Initialization ---
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -100,26 +118,18 @@ func main() {
 	}
 	logger.Info().Msg("IngestionService wrapper created successfully.")
 
-	// REFACTOR: This section replaces the previous startup logic to prevent deadlocks.
-	// 1. Start non-blocking background components.
-	// 2. Start the blocking HTTP server in a goroutine.
-	// 3. Wait for an OS signal or a server error to trigger a graceful shutdown.
-
-	// Start non-blocking background components first.
+	// --- 4. Start Service and Handle Shutdown ---
 	err = ingestionService.Start(ctx)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("IngestionService background components failed to start")
 	}
 
-	// Now, run the blocking HTTP server in a goroutine and wait for it to exit.
 	errChan := make(chan error, 1)
 	go func() {
 		logger.Info().Str("port", ingestionService.GetHTTPPort()).Msg("Starting HTTP server...")
-		// The blocking call is now in this goroutine. Its return value signals termination.
 		errChan <- ingestionService.BaseServer.Start()
 	}()
 
-	// Wait for a shutdown signal.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
@@ -127,18 +137,15 @@ func main() {
 
 	select {
 	case err = <-errChan:
-		// The HTTP server terminated on its own.
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error().Err(err).Msg("HTTP server failed unexpectedly")
 		} else {
 			logger.Info().Msg("HTTP server shut down gracefully.")
 		}
 	case sig := <-quit:
-		// An OS signal was received.
 		logger.Info().Str("signal", sig.String()).Msg("OS signal received. Initiating shutdown.")
 	}
 
-	// --- Graceful Shutdown ---
 	logger.Info().Msg("<<<<< Shutdown Initiated >>>>>")
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer shutdownCancel()

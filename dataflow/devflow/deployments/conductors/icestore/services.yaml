@@ -13,21 +13,21 @@ service_manager_spec:
 
     environment_vars:
       # These topics are used for communication between the Conductor and the Director.
-      PROJECT_ID: "replace-during-hydration"
+      PROJECT_ID: "replaced-during-hydration"
       SD_COMMAND_TOPIC: "director-commands-bq"
       SD_COMPLETION_TOPIC: "director-events-bq"
       SD_COMMAND_SUBSCRIPTION: "director-command-sub-bq"
 
 # dataflows describes one or more independent data processing pipelines.
 dataflows:
-  bigquery-flow:
+  icestore-flow:
     # services lists the application microservices to be deployed.
     services:
       ingestion-service:
         name: "ingestion-service"
         service_account: "ingestion-sa"
         dependencies:
-          - "servicedirector-bq-flow"
+          - "servicedirector-ice-flow"
         deployment:
           source_path: "."
           buildable_module_path: "cmd/ingestion" # Path to your ingestion service code
@@ -40,32 +40,27 @@ dataflows:
             MQTT_TOPIC: "devices/+/data"
             MQTT_CLIENT_ID: "test-client-devflow"
 
-      bigquery-service:
-        name: "bigquery-service"
-        service_account: "bigquery-sa"
+      icestore-service:
+        name: "icestore-service"
+        service_account: "icestore-sa"
         dependencies:
-          - "servicedirector-bq-flow"
+          - "servicedirector-ice-flow"
         deployment:
           source_path: "."
-          buildable_module_path: "cmd/bigquery" # Path to your BigQuery service code
-          environment_vars:
-            BIGQUERY_DATASET: "iot_data_bq"
-            BIGQUERY_TABLE: "ingested_payloads_bq"
+          buildable_module_path: "cmd/icestore" # Path to the Icestore service code
 
-    # resources lists the cloud infrastructure the ServiceDirector must create
-    # BEFORE the application services are deployed.
+    # Service director will create the following infrastructure before deploying the services.
     resources:
       topics:
         - name: "ingestion-bq"
-          producer_service: "ingestion-service"
+          producer_service:
+            name: "ingestion-service"
       subscriptions:
         - name: "bq-ingestion"
           topic: "ingestion-bq"
-          consumer_service: "bigquery-service"
-      bigquery_datasets:
-        - name: "iot_data_bq"
-      bigquery_tables:
-        - name: "ingested_payloads_bq"
-          dataset: "iot_data_bq"
-          schema_type: "github.com/illmade-knight/go-dataflow-service/dataflow/devflow/EnrichedTestPayload"
-          clustering_fields: ["device_id"]
+          consumer_service:
+            name: "icestore-service"
+      gcs_buckets:
+        - name: "iot_data_bk"
+          producers:
+            - name: "icestore-service"

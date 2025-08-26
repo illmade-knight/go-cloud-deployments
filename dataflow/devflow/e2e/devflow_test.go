@@ -9,12 +9,11 @@ package e2e
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"strconv"
 	"testing"
 	"time"
 
-	"cloud.google.com/go/pubsub"
+	"cloud.google.com/go/pubsub/v2"
 	"github.com/google/uuid"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/illmade-knight/go-dataflow-services/pkg/ingestion"
@@ -114,11 +113,11 @@ func TestDevflowE2E(t *testing.T) {
 
 	// 4. Set up resources via the director's API
 	start = time.Now()
-	setupURL := directorURL + "/dataflow/setup"
-	resp, err := http.Post(setupURL, "application/json", nil)
+
+	//TODO put back simple setup flow
+	err = directorService.SetupFoundationalDataflow(totalTestContext, dataflowName)
 	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, resp.StatusCode, "ServiceDirector setup request failed")
-	_ = resp.Body.Close()
+
 	timings["CloudResourceSetup(Director)"] = time.Since(start).String()
 	logger.Info().Msg("ServiceDirector confirmed resource setup is complete.")
 
@@ -127,16 +126,8 @@ func TestDevflowE2E(t *testing.T) {
 		logger.Info().Msg("Test finished. Requesting resource teardown from ServiceDirector...")
 		teardownCtx, teardownCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer teardownCancel()
-		teardownURL := directorURL + "/orchestrate/teardown"
-		req, _ := http.NewRequestWithContext(teardownCtx, http.MethodPost, teardownURL, nil)
-		cleanupResp, cleanupErr := http.DefaultClient.Do(req)
-		if cleanupErr == nil {
-			require.Equal(t, http.StatusOK, cleanupResp.StatusCode, "Teardown request failed")
-			_ = cleanupResp.Body.Close()
-			logger.Info().Msg("ServiceDirector confirmed resource teardown.")
-		} else {
-			t.Logf("Failed to send teardown request: %v", cleanupErr)
-		}
+		err = directorService.TeardownDataflow(teardownCtx, dataflowName)
+		require.NoError(t, err)
 		timings["CloudResourceTeardown(Director)"] = time.Since(teardownStart).String()
 	})
 
@@ -163,10 +154,8 @@ func TestDevflowE2E(t *testing.T) {
 	verificationDone := make(chan struct{})
 	expectedCountCh := make(chan int, 1)
 
-	sub := client.Subscription(verifySubscriptionID)
-	ok, err := sub.Exists(totalTestContext)
-	require.NoError(t, err)
-	require.True(t, ok)
+	qualifiedSubName := fmt.Sprintf("projects/%s/subscriptions/%s", projectID, verifySubscriptionID)
+	sub := client.Subscriber(qualifiedSubName)
 
 	go func() {
 		defer close(verificationDone)

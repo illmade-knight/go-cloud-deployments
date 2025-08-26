@@ -1,14 +1,17 @@
 # services.yaml
-name: "bigquery-dataflow"
+name: "ice-dataflow"
 region: "europe-west2"
 
 # service_manager_spec describes the ServiceDirector service itself.
 service_manager_spec:
-  name: "servicedirector-bq-flow"
-  service_account: "servicedirector-sa"
+  name: "servicedirector-enrichment-flow"
+  service_account: "servicedirector-ice-sa"
   deployment:
     source_path: "."
     buildable_module_path: "cmd/bq-servicedirector"
+
+  # REFACTOR: These sections are now required. The hydration logic uses them
+  # to auto-generate the Director's Pub/Sub topics and subscriptions.
   command_topic:
     name: "command-topic"
     lookup:
@@ -22,13 +25,14 @@ service_manager_spec:
 
 # dataflows describes one or more independent data processing pipelines.
 dataflows:
-  bigquery-flow:
+  icestore-flow:
+    # services lists the application microservices to be deployed.
     services:
       ingestion-service:
         name: "ingestion-service"
         service_account: "ingestion-sa"
         dependencies:
-          - "servicedirector-bq-flow"
+          - "servicedirector-enrichment-flow"
         deployment:
           source_path: "."
           buildable_module_path: "cmd/ingestion" # Path to your ingestion service code
@@ -41,29 +45,35 @@ dataflows:
             MQTT_TOPIC: "devices/+/data"
             MQTT_CLIENT_ID: "test-client-devflow"
 
-      bigquery-service:
-        name: "bigquery-service"
-        service_account: "bigquery-sa"
+      enrichment-service:
+        name: "enrichment-service"
+        service_account: "enrichment-sa"
         dependencies:
-          - "servicedirector-bq-flow"
+          - "servicedirector-enrichment-flow"
         deployment:
           source_path: "."
-          buildable_module_path: "cmd/bigquery" # Path to your BigQuery service code
+          buildable_module_path: "cmd/enrichment" # Path to the Enrichment service code
 
+    # Service director will create the following infrastructure before deploying the services.
     resources:
       topics:
         - name: "ingestion-bq"
           producer_service:
             name: "ingestion-service"
+        - name: "enrichment-out"
+          producer_service:
+            name: "enrichment-service"
       subscriptions:
         - name: "bq-ingestion"
           topic: "ingestion-bq"
           consumer_service:
-            name: "bigquery-service"
-      bigquery_tables:
-        - name: "ingested_payloads_bq"
-          producers:
-            - name: "bigquery-service"
-          dataset: "iot_data_bq"
-          schema_type: "github.com/illmade-knight/go-dataflow-service/dataflow/devflow/EnrichedTestPayload"
-          clustering_fields: ["device_id"]
+            name: "enrichment-service"
+      firestore_databases:
+        - name: "(default)"
+          consumers:
+            - name: "enrichment-service"
+      firestore_collections:
+        - name: "devices"
+          database: "(default)"
+          consumers:
+            - name: "enrichment-service"

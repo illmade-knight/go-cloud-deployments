@@ -1,0 +1,14 @@
+topics: []
+subscriptions:
+    - name: bq-ingestion
+      topic: ingestion-bq
+      consumer_service:
+        name: icestore-service
+        env: ""
+bigquery_datasets: []
+bigquery_tables: []
+gcs_buckets:
+    - name: iot_data_bk
+      producers:
+        - name: icestore-service
+          env: ""

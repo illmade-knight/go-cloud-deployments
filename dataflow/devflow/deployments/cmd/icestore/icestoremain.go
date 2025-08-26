@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	_ "embed" // Required for go:embed
 	"os"
 	"os/signal"
 	"syscall"
@@ -10,35 +11,63 @@ import (
 	"github.com/illmade-knight/go-dataflow-services/pkg/icestore"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"gopkg.in/yaml.v3"
 )
+
+//go:embed resources.yaml
+var resourcesYAML []byte
+
+// serviceConfig defines the minimal, local structs needed to unmarshal the
+// service-specific resources.yaml file.
+// REFACTOR: This struct now matches the structure of the provided resources.yaml.
+type serviceConfig struct {
+	Subscriptions []struct {
+		Name string `yaml:"name"`
+	} `yaml:"subscriptions"`
+	GCSBuckets []struct {
+		Name string `yaml:"name"`
+	} `yaml:"gcs_buckets"`
+}
 
 func main() {
 	logger := log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
 	zerolog.SetGlobalLevel(zerolog.InfoLevel)
 	ctx := context.Background()
 
-	projectID := os.Getenv("GOOGLE_CLOUD_PROJECT")
+	// --- 1. Load Resource Configuration from Embedded YAML ---
+	var resourceCfg serviceConfig
+	if err := yaml.Unmarshal(resourcesYAML, &resourceCfg); err != nil {
+		logger.Fatal().Err(err).Msg("Failed to parse embedded resources.yaml")
+	}
+	if len(resourceCfg.Subscriptions) != 1 {
+		logger.Fatal().Msgf("Configuration error: expected exactly 1 subscription, found %d", len(resourceCfg.Subscriptions))
+	}
+	if len(resourceCfg.GCSBuckets) != 1 {
+		logger.Fatal().Msgf("Configuration error: expected exactly 1 GCS bucket, found %d", len(resourceCfg.GCSBuckets))
+	}
+
+	// --- 2. Load Runtime Configuration from Environment ---
+	projectID := os.Getenv("PROJECT_ID")
 	if projectID == "" {
-		logger.Fatal().Msg("GOOGLE_CLOUD_PROJECT environment variable not set")
+		projectID = os.Getenv("GOOGLE_CLOUD_PROJECT") // Fallback for compatibility
+		if projectID == "" {
+			logger.Fatal().Msg("PROJECT_ID or GOOGLE_CLOUD_PROJECT environment variable not set")
+		}
 	}
 	cfg := icestore.LoadConfigDefaults(projectID)
 
-	// Override defaults with environment variables
+	// Set resource names from the embedded YAML
+	cfg.InputSubscriptionID = resourceCfg.Subscriptions[0].Name
+	cfg.IceStore.BucketName = resourceCfg.GCSBuckets[0].Name
+
+	// Override other defaults with environment variables
 	if port := os.Getenv("PORT"); port != "" {
 		cfg.HTTPPort = ":" + port
-	}
-	if subID := os.Getenv("INPUT_SUBSCRIPTION_ID"); subID != "" {
-		cfg.InputSubscriptionID = subID
-	}
-	if bucketName := os.Getenv("BUCKET_NAME"); bucketName != "" {
-		cfg.IceStore.BucketName = bucketName
 	}
 	if bucketPrefix := os.Getenv("BUCKET_PREFIX"); bucketPrefix != "" {
 		cfg.IceStore.ObjectPrefix = bucketPrefix
 	}
-
-	cloudRunPort := os.Getenv("PORT")
-	if cloudRunPort != "" {
+	if cloudRunPort := os.Getenv("PORT"); cloudRunPort != "" {
 		cfg.HTTPPort = cloudRunPort
 	}
 
@@ -48,11 +77,13 @@ func main() {
 		Str("gcs_bucket", cfg.IceStore.BucketName).
 		Msg("Preparing to start IceStore service")
 
+	// --- 3. Service Initialization ---
 	iceStoreService, err := icestore.NewIceStoreServiceWrapper(ctx, cfg, logger)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to create IceStore Service")
 	}
 
+	// --- 4. Start Service and Handle Shutdown ---
 	go func() {
 		if err := iceStoreService.Start(ctx); err != nil {
 			log.Fatal().Err(err).Msg("Failed to start IceStore Service")

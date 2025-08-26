@@ -9,17 +9,16 @@
 package e2e
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"github.com/illmade-knight/go-test/auth"
-	"github.com/stretchr/testify/assert"
-	"net/http"
 	"os"
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/illmade-knight/go-test/auth"
+	"github.com/stretchr/testify/assert"
 
 	"cloud.google.com/go/bigquery"
 	"cloud.google.com/go/storage"
@@ -129,19 +128,15 @@ func TestReplayToSimpleBigqueryFlowE2E(t *testing.T) {
 		directorService.Shutdown(shutdownCtx)
 	})
 
-	setupURL := directorURL + "/dataflow/setup"
-	resp, err := http.Post(setupURL, "application/json", bytes.NewBuffer([]byte{}))
+	err = directorService.SetupFoundationalDataflow(totalTestContext, replayDataflowName)
 	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	_ = resp.Body.Close()
 
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cleanupCancel()
 		logger.Info().Msg("Requesting resource teardown from ServiceDirector for replay flow...")
-		teardownURL := directorURL + "/orchestrate/teardown"
-		req, _ := http.NewRequestWithContext(cleanupCtx, http.MethodPost, teardownURL, nil)
-		_, _ = http.DefaultClient.Do(req)
+		err = directorService.TeardownDataflow(cleanupCtx, replayDataflowName)
+		require.NoError(t, err)
 		ds := bqClient.Dataset(replayDatasetID)
 		if err := ds.DeleteWithContents(cleanupCtx); err != nil {
 			logger.Warn().Err(err).Str("dataset", replayDatasetID).Msg("Failed to delete BigQuery dataset during replay cleanup.")
