@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	"cloud.google.com/go/pubsub"
+	"cloud.google.com/go/pubsub/v2"
 	mqtt "github.com/mochi-mqtt/server/v2"
 )
 
@@ -40,8 +40,9 @@ func NewPassthroughSubscriber(ctx context.Context, projectID, subID string, serv
 // It should be run in a goroutine. The provided context should be used to
 // signal when to stop receiving.
 func (s *PassthroughSubscriber) Start(ctx context.Context) {
-	sub := s.client.Subscription(s.subID)
-	slog.Info("Starting Pub/Sub subscriber", "subscription_id", s.subID)
+	qualifiedSubName := fmt.Sprintf("projects/%s/subscriptions/%s", s.client.Project(), s.subID)
+	sub := s.client.Subscriber(qualifiedSubName)
+	slog.Info("Starting Pub/Sub subscriber", "subscription_id", qualifiedSubName)
 
 	// Receive blocks until the context is cancelled or an unrecoverable error occurs.
 	err := sub.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {

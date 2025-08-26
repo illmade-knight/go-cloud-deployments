@@ -6,9 +6,7 @@ toolchain go1.24.6
 
 require (
 	cloud.google.com/go/bigquery v1.69.0
-	cloud.google.com/go/cloudbuild v1.23.0
 	cloud.google.com/go/firestore v1.18.0
-	cloud.google.com/go/pubsub v1.50.0
 	cloud.google.com/go/pubsub/v2 v2.0.0
 	cloud.google.com/go/secretmanager v1.15.0
 	cloud.google.com/go/storage v1.56.1
@@ -22,7 +20,6 @@ require (
 	github.com/stretchr/testify v1.11.0
 	golang.org/x/term v0.34.0
 	google.golang.org/api v0.248.0
-	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -31,6 +28,7 @@ require (
 	cloud.google.com/go/artifactregistry v1.17.1 // indirect
 	cloud.google.com/go/auth v0.16.5 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
+	cloud.google.com/go/cloudbuild v1.23.0 // indirect
 	cloud.google.com/go/compute/metadata v0.8.0 // indirect
 	cloud.google.com/go/iam v1.5.2 // indirect
 	cloud.google.com/go/longrunning v0.6.7 // indirect
@@ -132,4 +130,5 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250818200422-3122310a409c // indirect
 	google.golang.org/grpc v1.75.0 // indirect
 	google.golang.org/protobuf v1.36.8 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
